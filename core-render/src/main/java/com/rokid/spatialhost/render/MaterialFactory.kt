@@ -173,6 +173,64 @@ object MaterialFactory {
     }
 
     /**
+     * Textured panel surface: per-instance tint × UI texture (Canvas-
+     * rendered widgets). The bitmap is drawn in canvas orientation
+     * (y down); V is flipped here so it lines up with panel UVs
+     * (v up) — same flip as the video sphere.
+     */
+    fun buildPanelUi(engine: Engine): Material? {
+        ensureInitialized()
+        val pkg = try {
+            MaterialBuilder()
+                .name("panel_ui")
+                .materialDomain(MaterialBuilder.MaterialDomain.SURFACE)
+                .shading(MaterialBuilder.Shading.UNLIT)
+                .blending(MaterialBuilder.BlendingMode.OPAQUE)
+                .culling(MaterialBuilder.CullingMode.NONE)
+                .require(MaterialBuilder.VertexAttribute.UV0)
+                .uniformParameter(MaterialBuilder.UniformType.FLOAT4, "color")
+                .samplerParameter(
+                    MaterialBuilder.SamplerType.SAMPLER_2D,
+                    MaterialBuilder.SamplerFormat.FLOAT,
+                    MaterialBuilder.ParameterPrecision.DEFAULT,
+                    "ui",
+                )
+                .material(
+                    "void material(inout MaterialInputs material) {" +
+                        "  prepareMaterial(material);" +
+                        // NOTE: sampled RAW (no V flip): the deck test showed
+                        // that setImage maps the buffer's rows so that a
+                        // canvas-top draw lands at panel-top only with the
+                        // identity mapping (the video sphere needs the flip,
+                        // plain bitmap uploads do not).
+                        "  material.baseColor = materialParams.color *" +
+                        "      texture(materialParams_ui, getUV0());" +
+                        "}",
+                )
+                .platform(MaterialBuilder.Platform.MOBILE)
+                .targetApi(MaterialBuilder.TargetApi.ALL)
+                .optimization(MaterialBuilder.Optimization.PERFORMANCE)
+                .build()
+        } catch (t: Throwable) {
+            Log.e(TAG, "panel_ui build threw", t)
+            return null
+        }
+        if (!pkg.isValid) {
+            Log.e(TAG, "panel_ui package invalid")
+            return null
+        }
+        return try {
+            val buf = pkg.buffer
+            val material = Material.Builder().payload(buf, buf.remaining()).build(engine)
+            Log.i(TAG, "panel_ui compiled (${buf.remaining()} bytes)")
+            material
+        } catch (t: Throwable) {
+            Log.e(TAG, "panel_ui Material.Builder failed", t)
+            null
+        }
+    }
+
+    /**
      * Unlit textured material for the 360° video sphere: samples an EXTERNAL
      * sampler (the camera/stream SurfaceTexture wrapped by a Filament Stream).
      *

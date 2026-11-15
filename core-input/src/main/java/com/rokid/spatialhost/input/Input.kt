@@ -11,6 +11,8 @@ sealed class InputEvent {
     data class Drag(val dxPx: Float, val dyPx: Float) : InputEvent()
     data object Tap : InputEvent()
     data object DoubleTap : InputEvent()
+    /** Drag finished without a tap (UP after movement) — reset drag state. */
+    data object DragEnd : InputEvent()
     data object Back : InputEvent()
     data class Key(val keyCode: Int) : InputEvent()
 }
@@ -59,6 +61,13 @@ class GestureRecognizer(
                 Gesture.SELECT
             }
             g
+        }
+
+        InputEvent.DragEnd -> {
+            // A finished drag must not swallow the NEXT real click.
+            dragging = false
+            accumulatingDrag = 0f
+            null
         }
 
         InputEvent.DoubleTap -> Gesture.RECENTER

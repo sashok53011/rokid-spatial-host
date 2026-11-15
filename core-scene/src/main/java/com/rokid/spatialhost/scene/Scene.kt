@@ -33,6 +33,13 @@ data class SpatialPanel(
     val heightM: Float,
     val position: Vec3,
     val label: String = id,
+    /** Widgets drawn into this panel's texture (UV space, v = up). */
+    val widgets: List<Widget> = emptyList(),
+    /**
+     * Keep the panel visible even while the immersive video sphere plays
+     * (arc panels are pulled out of the scene, control decks are not).
+     */
+    val persistent: Boolean = false,
 ) {
     /** Forward axis (unit vector origin→panel flipped: panel faces origin). */
     val normal: Vec3 get() = (position * -1f).normalized()

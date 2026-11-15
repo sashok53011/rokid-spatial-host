@@ -56,6 +56,28 @@ class StreamPlayer(context: Context) {
         playing = true
     }
 
+    /** Current position in ms (0 when nothing is prepared yet). */
+    val positionMs: Long
+        get() = player?.currentPosition ?: 0L
+
+    /** Content duration in ms; 0 for live/unknown streams. */
+    val durationMs: Long
+        get() {
+            val d = player?.contentDuration ?: 0L
+            return if (d > 0L) d else 0L // covers C.TIME_UNSET (negative)
+        }
+
+    /** Scrub to [positionMs]; ignored for live sources (duration 0). */
+    fun seekTo(positionMs: Long) {
+        player?.seekTo(positionMs)
+    }
+
+    /** Loop the current item (video panel checkbox). */
+    fun setLooping(on: Boolean) {
+        player?.repeatMode = if (on) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+        Log.i(TAG, "looping=$on")
+    }
+
     fun release() {
         player?.release()
         player = null

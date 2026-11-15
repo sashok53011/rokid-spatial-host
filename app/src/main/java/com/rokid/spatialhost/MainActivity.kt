@@ -31,6 +31,7 @@ import com.rokid.spatialhost.input.InputEvent
 import com.rokid.spatialhost.input.NavigationState
 import com.rokid.spatialhost.render.FilamentRenderer
 import com.rokid.spatialhost.scene.LayoutEngine
+import com.rokid.spatialhost.scene.widgetAt
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -432,12 +433,26 @@ class MainActivity : Activity() {
         setContentView(root)
 
         renderer = FilamentRenderer(surfaceView)
-        layoutEngine = LayoutEngine().apply { defaultArc(count = 3) }
+        layoutEngine = LayoutEngine().apply {
+            defaultArc(count = 3)
+            add(
+                com.rokid.spatialhost.scene.SpatialPanel(
+                    id = VIDEO_PANEL_ID,
+                    widthM = 1.6f,
+                    heightM = 0.9f,
+                    position = com.rokid.spatialhost.scene.Vec3(0f, -1.05f, -2.45f),
+                    label = "Video",
+                    widgets = videoPanelWidgets(),
+                    persistent = true, // stays visible while the video plays
+                ),
+            )
+        }
         renderer.setPanels(
             layoutEngine.panels.values.map {
                 com.rokid.spatialhost.render.PanelSpec(
                     it.id, it.widthM, it.heightM,
                     it.position.x, it.position.y, it.position.z,
+                    persistent = it.persistent,
                 )
             },
         )
@@ -888,6 +903,10 @@ class MainActivity : Activity() {
                             if (now - lastTapTime < 300) InputEvent.DoubleTap else InputEvent.Tap
                         lastTapTime = now
                         handleGesture(recognizer.onEvent(gesture))
+                    } else {
+                        // End of a drag: without this the recognizer keeps its
+                        // dragging flag and swallows the NEXT real click.
+                        recognizer.onEvent(InputEvent.DragEnd)
                     }
                     true
                 }
@@ -933,6 +952,10 @@ class MainActivity : Activity() {
     // ------------------------------------------------------------------
 
     private var videoActive = false // main thread only
+    private var videoLooping = false
+    private var videoUiBitmap: android.graphics.Bitmap? = null
+    private var videoUiPixels: ByteArray? = null
+    private var lastVideoUiSig: String? = null
 
     /**
      * V toggles the backdrop between the flat tinted sphere and the video
@@ -963,6 +986,7 @@ class MainActivity : Activity() {
             }
             player.setSurface(surface)
             player.prepare(url, lowLatency = true)
+            player.setLooping(videoLooping)
         }
     }
 
@@ -979,14 +1003,126 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun nextVideoSource() {
-        sourceIndex = (sourceIndex + 1) % videoSources.size
+    private fun nextVideoSource() = stepVideoSource(+1)
+
+    private fun prevVideoSource() = stepVideoSource(-1)
+
+    private fun stepVideoSource(delta: Int) {
+        if (videoSources.isEmpty()) return
+        sourceIndex = (sourceIndex + delta + videoSources.size) % videoSources.size
         Log.i(TAG, "video source → ${videoSources[sourceIndex].first}")
         if (videoActive) {
             // Rapid stop→start resolves correctly: the render loop processes
             // the color (detach) request before the video (attach) request.
             stopVideo()
             startVideo()
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Video control deck: widgets on a persistent panel (see Widgets.kt)
+    // ------------------------------------------------------------------
+
+    /** Current video state as widgets — rebuilt on every redraw. */
+    private fun videoPanelWidgets(): List<com.rokid.spatialhost.scene.Widget> {
+        val srcName = videoSources.getOrNull(sourceIndex)?.first ?: "—"
+        val player = streamPlayer
+        val durMs = player?.durationMs ?: 0L
+        val posMs = player?.positionMs ?: 0L
+        val playing = player?.playing == true
+        val timeText = when {
+            durMs > 0 -> "${fmtMs(posMs)} / ${fmtMs(durMs)}"
+            videoActive -> "LIVE"
+            else -> "—"
+        }
+        return listOf(
+            com.rokid.spatialhost.scene.Widget.Label("vid.src", uv(0.04f, 0.72f, 0.66f, 0.14f), srcName),
+            com.rokid.spatialhost.scene.Widget.Toggle("vid.loop", uv(0.74f, 0.72f, 0.22f, 0.14f), "LOOP", videoLooping),
+            com.rokid.spatialhost.scene.Widget.Button("vid.play", uv(0.04f, 0.44f, 0.26f, 0.20f), if (playing) "PAUSE" else "PLAY"),
+            com.rokid.spatialhost.scene.Widget.Button("vid.prev", uv(0.34f, 0.44f, 0.28f, 0.20f), "< SRC"),
+            com.rokid.spatialhost.scene.Widget.Button("vid.next", uv(0.66f, 0.44f, 0.30f, 0.20f), "SRC >"),
+            com.rokid.spatialhost.scene.Widget.Label("vid.time", uv(0.04f, 0.26f, 0.60f, 0.12f), timeText),
+            com.rokid.spatialhost.scene.Widget.Slider(
+                "vid.seek", uv(0.04f, 0.06f, 0.92f, 0.14f), "SEEK",
+                value = if (durMs > 0) posMs.toFloat() / durMs else 0f,
+            ),
+        )
+    }
+
+    private fun uv(x: Float, y: Float, w: Float, h: Float) =
+        com.rokid.spatialhost.scene.UvRect(x, y, w, h)
+
+    private fun fmtMs(ms: Long): String {
+        val s = ms / 1000
+        return "%d:%02d".format(s / 60, s % 60)
+    }
+
+    /** Render the deck's current state and hand the pixels to the renderer. */
+    private fun pushVideoPanelUi() {
+        val panel = layoutEngine.panels[VIDEO_PANEL_ID] ?: return
+        val w = com.rokid.spatialhost.render.PanelUiDrawer.WIDTH
+        val h = com.rokid.spatialhost.render.PanelUiDrawer.HEIGHT
+        val bmp = videoUiBitmap ?: android.graphics.Bitmap
+            .createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
+            .also { videoUiBitmap = it }
+        com.rokid.spatialhost.render.PanelUiDrawer.draw(
+            panel.copy(widgets = videoPanelWidgets()), bmp,
+        )
+        val px = videoUiPixels ?: ByteArray(w * h * 4).also { videoUiPixels = it }
+        bmp.copyPixelsToBuffer(java.nio.ByteBuffer.wrap(px))
+        renderer.updatePanelUi(VIDEO_PANEL_ID, w, h, px)
+    }
+
+    /** Dispatch a widget click under the crosshair ([u] localizes sliders). */
+    private fun handleWidget(w: com.rokid.spatialhost.scene.Widget, u: Float) {
+        Log.i(TAG, "widget: ${w.id}")
+        when (w) {
+            is com.rokid.spatialhost.scene.Widget.Button -> when (w.id) {
+                "vid.play" -> playPauseVideo()
+                "vid.prev" -> prevVideoSource()
+                "vid.next" -> nextVideoSource()
+            }
+
+            is com.rokid.spatialhost.scene.Widget.Toggle -> when (w.id) {
+                "vid.loop" -> {
+                    videoLooping = !videoLooping
+                    streamPlayer?.setLooping(videoLooping)
+                }
+            }
+
+            is com.rokid.spatialhost.scene.Widget.Slider -> when (w.id) {
+                "vid.seek" -> {
+                    val dur = streamPlayer?.durationMs ?: 0L
+                    if (dur > 0) {
+                        val target = (w.valueAt(u) * dur).toLong()
+                        streamPlayer?.seekTo(target)
+                        Log.i(TAG, "seek → ${fmtMs(target)}")
+                    } else {
+                        Log.i(TAG, "seek ignored (live source, no duration)")
+                    }
+                }
+            }
+
+            is com.rokid.spatialhost.scene.Widget.Label -> Unit
+        }
+        pushVideoPanelUi()
+    }
+
+    /** Deck PLAY/PAUSE: starts the sphere if it is off, else toggles. */
+    private fun playPauseVideo() {
+        if (!videoActive) {
+            startVideo()
+            return
+        }
+        val p = streamPlayer ?: return
+        if (p.playing) {
+            p.pause()
+            videoStatus = "paused"
+            Log.i(TAG, "video paused")
+        } else {
+            p.resume()
+            videoStatus = "streaming"
+            Log.i(TAG, "video resumed")
         }
     }
 
@@ -1039,6 +1175,12 @@ class MainActivity : Activity() {
             navState.selectedPanelId = hit.panel.id
             navState.focusedPanelId = hit.panel.id
             renderer.setFocusedPanel(hit.panel.id)
+            // Interactive widgets win over plain panel selection.
+            val widget = hit.panel.widgetAt(hit.u, hit.v)
+            if (widget != null) {
+                handleWidget(widget, hit.u)
+                return
+            }
             Log.i(TAG, "selected ${hit.panel.id} at ${"%.2f".format(hit.distance)}m u=${"%.2f".format(hit.u)} v=${"%.2f".format(hit.v)}")
         } else {
             navState.selectedPanelId = null
@@ -1063,6 +1205,15 @@ class MainActivity : Activity() {
     private fun updateHud() {
         power.sample()
         renderer.targetFps = thermal.budget.value.targetFps
+
+        // Video deck: redraw when its state (or the playhead) changes.
+        val deckSig = "$videoStatus|$sourceIndex|${streamPlayer?.playing}" +
+            "|${(streamPlayer?.positionMs ?: 0L) / 1000}" +
+            "|${streamPlayer?.durationMs ?: 0L}|$videoLooping|${streamPlayer != null}"
+        if (deckSig != lastVideoUiSig) {
+            lastVideoUiSig = deckSig
+            pushVideoPanelUi()
+        }
 
         val bridgeState = activeBridge?.state?.value
         val bridgeLabel = when (bridgeState) {
@@ -1121,8 +1272,8 @@ class MainActivity : Activity() {
             append("touch  : drag=look/rotate tap=select 2x-tap=recenter swipe/←→=focus H=hud V=video M=model")
             append("\n")
             append(
-                "video  : $videoStatus · ${videoSources[sourceIndex].first} " +
-                    "(V=on/off N=source)\n",
+                "video  : $videoStatus · ${videoSources.getOrNull(sourceIndex)?.first ?: "—"} " +
+                    "(V=on/off N=source · deck panel below)\n",
             )
         }
     }
@@ -1177,6 +1328,9 @@ class MainActivity : Activity() {
          */
         private const val AUTO_START_VIDEO = true
         private const val MAX_LOOK_PITCH = 1.45f // ≈83°
+
+        /** Persistent control-deck panel id (widgets, see PanelUiDrawer). */
+        private const val VIDEO_PANEL_ID = "video-deck"
 
         /** D3: fixed physics step (the tick runs every 16 ms). */
         private const val FIXED_PHYSICS_DT = 1f / 60f

@@ -39,6 +39,7 @@ path can be reproduced.
 | **D3a: Jolt physics — gravity, floor, dynamic model body (P toggle)** | ✅ exact landing verified |
 | **D3b: grab-and-throw — spring drag, mouse-flick throws** | ✅ 3.16 m throw verified |
 | **D4: OBJ + glTF export (E) with verified round-trip** | ✅ Phase D complete |
+| **Panel widgets + video deck: PLAY/SRC/LOOP/SEEK via gaze-click** | ✅ |
 | Release build (debug-key signed, arm64-only ~26 MB) | ✅ |
 
 ## Requirements
@@ -99,6 +100,7 @@ needs compileSdk 37), **Kotlin 2.4.x**, AGP from the version catalog.
 | `P` | Physics on/off — the model drops onto the floor as a rigid body |
 | `E` | Export the current model as `.glb` + `.obj` into Downloads (round-trip verified) |
 | `N` | Next video source |
+| Gaze-click deck widgets | Bottom "Video" deck: PLAY/PAUSE · ‹SRC/SRC› · LOOP toggle · SEEK slider (click = seek) |
 | `H` | Toggle HUD |
 | `R` / arrows | Recenter / cycle focused panel |
 
@@ -290,6 +292,26 @@ compare primitive/node/texture/material counts.
 moves, e.g. an `input swipe` with a long duration or a careful human)
 were previously misread as taps.
 
+Also: a drag's `ACTION_UP` must emit `InputEvent.DragEnd` — otherwise
+the recognizer keeps its `dragging` flag and **swallows the next real
+click** (symptom: you must click twice; in adb scripts: `input tap`
+right after `input swipe` did nothing).
+
+### Panel widgets (the video deck)
+
+* `TextureSampler` is **native-backed** — a companion-object val would be
+  created in `<clinit>` *before* `Filament.init()` loads libfilament-jni
+  and dies with `UnsatisfiedLinkError: nCreateSampler`. Keep such vals
+  `by lazy` (first use happens on the render thread, after engine
+  creation).
+* Widget bitmaps map to panel UVs **without** a V flip (raw `getUV0()`) —
+  unlike the video sphere, a plain `setImage` bitmap upload already lines
+  canvas-top with panel-top. The wrong direction shows instantly as the
+  whole deck mirrored vertically; don't reuse the video's flip here.
+* `SpatialPanel.persistent` panels survive the immersive-video hide —
+  logged as `3 hidden, 1 persistent` (the arc panels disappear, the deck
+  stays for control).
+
 ## Debugging tips
 
 * **Screenshots**: PowerShell `>` corrupts binary output — use
@@ -334,11 +356,11 @@ were previously misread as taps.
       select/move/delete (foundation for scenes below)
 - [ ] **Physics: stacked scenes** — spawn several boxes/spheres, collision
       callbacks (log/emit events), raycast queries for gameplay
-- [ ] **Panel widgets**: buttons/sliders/checkboxes rendered into panel
-      textures with UV hit-testing (the click plumbing exists in
-      `selectAtCrosshair`)
-- [ ] **Playback controls panel** for video (play/pause/seek/source
-      picker) — media3 exposes everything already
+- [x] **Panel widgets**: buttons/sliders/checkboxes rendered into panel
+      textures with UV hit-testing — done: `Widgets.kt` + `PanelUiDrawer`
+- [x] **Playback controls panel** for video — done: the persistent
+      `video-deck` panel (PLAY/PAUSE, SRC stepping, LOOP, click-to-seek
+      via `StreamPlayer` position/duration/seek)
 - [ ] **CI**: GitHub Actions workflow (`assembleRelease` + unit tests)
 - [ ] **Parser test suite**: round-trip fuzz tests for `GltfParser` ↔
       `GltfExporter` (pure-Kotlin module, easy to test on JVM)

@@ -1,5 +1,7 @@
 package com.rokid.spatialhost.render
 
+import android.graphics.Bitmap
+import android.graphics.Color
 import android.graphics.SurfaceTexture
 import android.os.Handler
 import android.os.Looper
@@ -26,6 +28,8 @@ import com.google.android.filament.TextureSampler
 import com.google.android.filament.View
 import com.google.android.filament.Viewport
 import com.rokid.spatialhost.scene.gltf.GltfModel
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
 /** Panel description pushed from the app (mirrors core-scene's SpatialPanel). */
 data class PanelSpec(
@@ -35,6 +39,8 @@ data class PanelSpec(
     val x: Float,
     val y: Float,
     val z: Float,
+    /** Survives the immersive-video panel hide (control decks). */
+    val persistent: Boolean = false,
 )
 
 /**
@@ -82,6 +88,17 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
 
     fun setPanels(specs: List<PanelSpec>) {
         pendingPanels = specs
+    }
+
+    /** Canvas-rendered RGBA pixels for one panel's widget texture. */
+    class PanelUiUpdate(val id: String, val width: Int, val height: Int, val pixels: ByteArray)
+
+    @Volatile
+    private var pendingPanelUi: List<PanelUiUpdate>? = null
+
+    /** App thread: replace the widget texture of panel [id]. */
+    fun updatePanelUi(id: String, width: Int, height: Int, pixels: ByteArray) {
+        pendingPanelUi = (pendingPanelUi ?: emptyList()) + PanelUiUpdate(id, width, height, pixels)
     }
 
     fun setFocusedPanel(id: String?) {
@@ -197,6 +214,14 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
         val ibl: IblBuilder,
         val panelEntities: MutableMap<String, Int> = mutableMapOf(),
         val panelInstances: MutableMap<String, MaterialInstance?> = mutableMapOf(),
+        /** Widget-textured panel material (null → legacy flat color panels). */
+        val panelUiMaterial: Material? = null,
+        val panelTextures: MutableMap<String, Texture> = mutableMapOf(),
+        val panelTexSizes: MutableMap<String, Pair<Int, Int>> = mutableMapOf(),
+        var whiteTexture: Texture? = null,
+        /** Ids kept visible while the video sphere hides the rest. */
+        val panelPersistent: MutableSet<String> = mutableSetOf(),
+        val panelHidden: MutableSet<String> = mutableSetOf(),
         // video sphere resources (created lazily by requestVideoSphere)
         var videoMaterial: Material? = null,
         var videoTexture: Texture? = null,
@@ -255,6 +280,7 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
 
             // --- content -------------------------------------------------
             val colorMaterial = MaterialFactory.buildColorUnlit(e)
+            val panelUiMaterial = MaterialFactory.buildPanelUi(e)
             val litMaterial = MaterialFactory.buildLit(e)
             val sphereMesh = Meshes.createSphere(e, radius = 30f)
             val quadMesh = Meshes.createQuad(e)
@@ -301,6 +327,7 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
                 lightEntity = lightEntity,
                 modelManager = ModelManager(e, s, litMaterial),
                 ibl = ibl,
+                panelUiMaterial = panelUiMaterial,
             )
             Log.i(
                 TAG,
@@ -333,6 +360,7 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
                 lastFrameStart = System.nanoTime()
 
                 applyPendingPanels()
+                applyPendingPanelUi()
                 applyFocus()
 
                 // glTF model (D1)
@@ -436,21 +464,32 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
         val st = sceneState ?: return
         val e = st.engine
 
-        // Remove existing panels
+        // Remove existing panels (and their widget textures)
         for (entity in st.panelEntities.values) {
             st.scene.removeEntity(entity)
             e.destroyEntity(entity)
         }
         st.panelEntities.clear()
         st.panelInstances.clear()
+        st.panelPersistent.clear()
+        st.panelHidden.clear()
+        for (tex in st.panelTextures.values) e.destroyTexture(tex)
+        st.panelTextures.clear()
+        st.panelTexSizes.clear()
         lastAppliedFocus = null
 
-        if (st.colorMaterial == null) return
+        val material = st.panelUiMaterial ?: st.colorMaterial
+        if (material == null) return
+        val useUi = st.panelUiMaterial != null
+        val white = if (useUi) ensureWhiteTexture(st) else null
         val tm = e.transformManager
         for (spec in specs) {
             val entity = EntityManager.get().create()
-            val instance = st.colorMaterial.createInstance()
-            instance.setParameter("color", PANEL_TINT[0], PANEL_TINT[1], PANEL_TINT[2], PANEL_TINT[3])
+            val instance = material.createInstance()
+            val baseTint = if (useUi) UI_TINT else PANEL_TINT
+            instance.setParameter("color", baseTint[0], baseTint[1], baseTint[2], baseTint[3])
+            white?.let { instance.setParameter("ui", it, PANEL_SAMPLER) }
+            if (spec.persistent) st.panelPersistent += spec.id
 
             RenderableManager.Builder(1)
                 .geometry(
@@ -479,9 +518,65 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
         }
         Log.i(
             TAG,
-            "panels applied: ${specs.size} (entities=${st.scene.entityCount} " +
-                "renderables=${st.scene.renderableCount})",
+            "panels applied: ${specs.size} (persistent=${st.panelPersistent}, " +
+                "entities=${st.scene.entityCount} renderables=${st.scene.renderableCount})",
         )
+    }
+
+    /** Upload widget pixels for one panel (create/resize its texture). */
+    private fun applyPendingPanelUi() {
+        val updates = pendingPanelUi ?: return
+        pendingPanelUi = null
+        val st = sceneState ?: return
+        if (st.panelUiMaterial == null) return
+        val e = st.engine
+        for (u in updates) {
+            if (u.id !in st.panelEntities) continue
+            val size = u.width to u.height
+            var tex = st.panelTextures[u.id]
+            if (tex == null || st.panelTexSizes[u.id] != size) {
+                tex?.let { e.destroyTexture(it) }
+                tex = Texture.Builder()
+                    .width(u.width)
+                    .height(u.height)
+                    .format(Texture.InternalFormat.RGBA8)
+                    .sampler(Texture.Sampler.SAMPLER_2D)
+                    .levels(1)
+                    .build(e)
+                st.panelTextures[u.id] = tex
+                st.panelTexSizes[u.id] = size
+                Log.i(TAG, "panel ui texture: ${u.id} ${u.width}x${u.height}")
+            }
+            val buf = ByteBuffer.allocateDirect(u.pixels.size).order(ByteOrder.nativeOrder())
+            buf.put(u.pixels)
+            buf.rewind()
+            tex.setImage(e, 0, Texture.PixelBufferDescriptor(buf, Texture.Format.RGBA, Texture.Type.UBYTE))
+            st.panelInstances[u.id]?.setParameter("ui", tex, PANEL_SAMPLER)
+        }
+    }
+
+    /** Shared white texture so panels without widgets bind a valid sampler. */
+    private fun ensureWhiteTexture(st: SceneState): Texture {
+        st.whiteTexture?.let { return it }
+        val bmp = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
+        bmp.setPixel(0, 0, Color.WHITE)
+        val buf = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder())
+        bmp.copyPixelsToBuffer(buf)
+        buf.rewind()
+        bmp.recycle()
+        val tex = Texture.Builder()
+            .width(1)
+            .height(1)
+            .format(Texture.InternalFormat.RGBA8)
+            .sampler(Texture.Sampler.SAMPLER_2D)
+            .levels(1)
+            .build(st.engine)
+        tex.setImage(
+            st.engine, 0,
+            Texture.PixelBufferDescriptor(buf, Texture.Format.RGBA, Texture.Type.UBYTE),
+        )
+        st.whiteTexture = tex
+        return tex
     }
 
     private fun applyFocus() {
@@ -489,8 +584,13 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
         if (f == lastAppliedFocus) return
         lastAppliedFocus = f
         val st = sceneState ?: return
+        val useUi = st.panelUiMaterial != null
         for ((id, instance) in st.panelInstances) {
-            val tint = if (id == f) FOCUS_TINT else PANEL_TINT
+            val tint = when {
+                id != f -> if (useUi) UI_TINT else PANEL_TINT
+                useUi -> UI_FOCUS_TINT
+                else -> FOCUS_TINT
+            }
             instance?.setParameter("color", tint[0], tint[1], tint[2], tint[3])
         }
     }
@@ -574,10 +674,18 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
 
         // Immersive mode: the front panels would occlude the panorama —
         // pull them out of the scene (entities are kept, re-added on stop).
-        for (entity in st.panelEntities.values) {
+        // Persistent panels (the video control deck) stay visible.
+        st.panelHidden.clear()
+        for ((id, entity) in st.panelEntities) {
+            if (id in st.panelPersistent) continue
             st.scene.removeEntity(entity)
+            st.panelHidden += id
         }
-        Log.i(TAG, "panels hidden while video plays (${st.panelEntities.size})")
+        Log.i(
+            TAG,
+            "panels hidden while video plays " +
+                "(${st.panelHidden.size} hidden, ${st.panelPersistent.size} persistent)",
+        )
 
         Handler(Looper.getMainLooper()).post { onReady(surface) }
     }
@@ -616,10 +724,11 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
         st.videoMaterial = null
         st.videoInstance = null
 
-        // Panels back for non-video mode.
-        for (entity in st.panelEntities.values) {
-            st.scene.addEntity(entity)
+        // Panels back for non-video mode (only the ones we actually hid).
+        for (id in st.panelHidden) {
+            st.panelEntities[id]?.let { st.scene.addEntity(it) }
         }
+        st.panelHidden.clear()
         Log.i(TAG, "video sphere detached (wasStreaming=$hadVideo), panels restored")
     }
 
@@ -632,6 +741,10 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
             e.destroyEntity(entity)
         }
         st.panelInstances.values.forEach { it?.let { i -> e.destroyMaterialInstance(i) } }
+        for (tex in st.panelTextures.values) e.destroyTexture(tex)
+        st.panelTextures.clear()
+        st.whiteTexture?.let { e.destroyTexture(it) }
+        st.panelUiMaterial?.let { e.destroyMaterial(it) }
         st.scene.removeEntity(st.sphereEntity)
         e.destroyEntity(st.sphereEntity)
         st.sphereInstance?.let { e.destroyMaterialInstance(it) }
@@ -730,5 +843,20 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
         private val SPHERE_COLOR = floatArrayOf(0.12f, 0.17f, 0.28f, 1f)
         private val PANEL_TINT = floatArrayOf(0.12f, 0.30f, 0.40f, 1f)
         private val FOCUS_TINT = floatArrayOf(0.30f, 0.72f, 0.85f, 1f)
+        /** Widget panels: neutral pass-through; focus = uniform brighten. */
+        private val UI_TINT = floatArrayOf(1f, 1f, 1f, 1f)
+        private val UI_FOCUS_TINT = floatArrayOf(1.5f, 1.5f, 1.5f, 1f)
+        // lazy: TextureSampler is native-backed and the companion <clinit>
+        // runs when FilamentRenderer is constructed — BEFORE Filament.init()
+        // loads libfilament-jni. First access happens on the render thread.
+        private val PANEL_SAMPLER by lazy {
+            TextureSampler(
+                TextureSampler.MinFilter.LINEAR,
+                TextureSampler.MagFilter.LINEAR,
+                TextureSampler.WrapMode.CLAMP_TO_EDGE,
+                TextureSampler.WrapMode.CLAMP_TO_EDGE,
+                TextureSampler.WrapMode.CLAMP_TO_EDGE,
+            )
+        }
     }
 }

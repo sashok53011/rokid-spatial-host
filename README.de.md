@@ -40,6 +40,7 @@ der Pfad ist also reproduzierbar.
 | **D3a: Jolt-Physik — Gravitation, Boden, dynamischer Körper (P)** | ✅ exaktes Landen verifiziert |
 | **D3b: Greifen-und-Werfen — Feder-Drag, Maus-Flick wirft** | ✅3,16 m Wurf verifiziert |
 | **D4: OBJ- + glTF-Export (E) mit verifiziertem Round-Trip** | ✅ Phase D abgeschlossen |
+| **Panel-Widgets + Video-Deck: PLAY/SRC/LOOP/SEEK per Blick-Klick** | ✅ |
 | Release-Build (mit Debug-Key signiert, arm64-only ~26 MB) | ✅ |
 
 ## Voraussetzungen
@@ -100,6 +101,7 @@ Version-Catalog.
 | `P` | Physik an/aus — das Modell fällt als Starrkörper auf den Boden |
 | `E` | Aktuelles Modell als `.glb` + `.obj` nach Downloads exportieren (Round-Trip verifiziert) |
 | `N` | Nächste Videoquelle |
+| Deck-Widgets anblicken & klicken | Untere „Video"-Platte: PLAY/PAUSE · ‹SRC/SRC› · LOOP-Schalter · SEEK-Slider (Klick = Spule) |
 | `H` | HUD ein/aus |
 | `R` / Pfeiltasten | Recenter / Panel-Fokus zyklisch wechseln |
 
@@ -305,6 +307,27 @@ berechnet werden, nicht aus Event-Deltas — langsame Züge (kleine
 Event-Deltas, z. B. ein `input swipe` mit langer Dauer oder ein
 vorsichtiger Mensch) wurden vorher als Tap missverstanden.
 
+Außerdem: das `ACTION_UP` eines Zugs muss `InputEvent.DragEnd` senden —
+sonst hält der Recognizer seine `dragging`-Flagge und **verschluckt den
+nächsten echten Klick** (Symptom: zweimal klicken; in adb-Skripten tat
+`input tap` direkt nach `input swipe` nichts).
+
+### Panel-Widgets (das Video-Deck)
+
+* `TextureSampler` ist **nativ** — ein companion-`val` würde in
+  `<clinit>` *vor* `Filament.init()` (das lädt libfilament-jni)
+  erzeugt und mit `UnsatisfiedLinkError: nCreateSampler` sterben. Solche
+  vals `by lazy` halten (erste Nutzung im Renderthread nach Engine-
+  Erstellung).
+* Widget-Bitmaps mappen auf Panel-UVs **ohne** V-Flip (rohes `getUV0()`)
+  — anders als die Videosphäre bringt ein normales `setImage`-Bitmap-
+  Upload die Bitmap-Oberkante schon mit der Panel-Oberkante zur
+  Übereinstimmung. Falsche Richtung zeigt sofort: das ganze Deck
+  vertikal gespiegelt; den Video-Flip hier nicht wiederverwenden.
+* Panels mit `persistent=true` überleben das Ausblenden im
+  Immersive-Video — geloggt als `3 hidden, 1 persistent` (die
+  Arc-Panel-Platten verschwinden, das Deck bleibt zur Steuerung).
+
 ## Debugging-Tipps
 
 * **Screenshots**: PowerShell `>` zerstört Binärdaten —
@@ -351,11 +374,13 @@ vorsichtiger Mensch) wurden vorher als Tap missverstanden.
       select/move/delete (Fundament für die Szenen unten)
 - [ ] **Physik: Stapel-Szenen** — mehrere Kugeln/Kästen spawnen,
       Kollisions-Callbacks (Logs/Events), Raycast-Abfragen für Gameplay
-- [ ] **Panel-Widgets**: Buttons/Sliders/Checkboxen, in Panel-Texturen
-      gerendert mit UV-Hit-Testing (die Klick-Verdrahtung in
-      `selectAtCrosshair` existiert schon)
-- [ ] **Wiedergabe-Steuerpult** für Video (play/pause/seek/Quellenwahl) —
-      media3 kann das alles schon
+- [x] **Panel-Widgets**: Buttons/Sliders/Checkboxen, in Panel-Texturen
+      gerendert mit UV-Hit-Testing — fertig: `Widgets.kt` +
+      `PanelUiDrawer`
+- [x] **Wiedergabe-Steuerpult** für Video (play/pause/seek/Quellenwahl) —
+      fertig: die persistente `video-deck`-Platte (PLAY/PAUSE,
+      SRC-Schritt, LOOP, Spulen per Klick über Position/Dauer von
+      `StreamPlayer`)
 - [ ] **CI**: GitHub-Actions-Workflow (`assembleRelease` + Unit-Tests)
 - [ ] **Parser-Testsuite**: Round-Trip-Fuzz-Tests `GltfParser` ↔
       `GltfExporter` (reines Kotlin-Moduell, leicht auf der JVM)
