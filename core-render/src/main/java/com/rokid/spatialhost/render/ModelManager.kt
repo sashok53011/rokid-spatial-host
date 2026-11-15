@@ -70,18 +70,18 @@ class ModelManager(
 
         // Textures are decoded once per image and shared across primitives.
         val texCache = mutableMapOf<Int, Pair<Texture, TextureSampler>>()
-        val white = buildSolidTexture() // fallback when a primitive has no map
+        val white = buildSolidTexture() // baseColor / mrMap fallback
+        val flatNormal = buildFlatNormalTexture() // normalMap fallback (0,0,1)
         lm.textures.add(white.first)
+        lm.textures.add(flatNormal.first)
 
-        fun textureFor(texIdx: Int?): Pair<Texture, TextureSampler> {
-            if (texIdx == null || texIdx !in model.textures.indices) return white
-            return texCache.getOrPut(texIdx) {
-                val built = decodeTexture(model.textures[texIdx])
-                if (built == null) white else {
-                    lm.textures.add(built.first)
-                    built
-                }
-            }
+        fun textureFor(texIdx: Int?, default: Pair<Texture, TextureSampler>): Pair<Texture, TextureSampler> {
+            if (texIdx == null || texIdx !in model.textures.indices) return default
+            texCache[texIdx]?.let { return it }
+            val built = decodeTexture(model.textures[texIdx]) ?: return default
+            lm.textures.add(built.first)
+            texCache[texIdx] = built
+            return built
         }
 
         fun walk(nodeIdx: Int, parentTf: Int) {
@@ -95,9 +95,8 @@ class ModelManager(
 
             model.primitives[node.mesh]?.forEach { prim ->
                 val matDef = prim.material?.let { model.materials.getOrNull(it) }
-                val (tex, sampler) = textureFor(matDef?.baseColorTexture)
 
-                // Per-primitive instance: tint × texture, PBR factors.
+                // Per-primitive instance: tint × maps, PBR factors.
                 val instance = lit.createInstance()
                 val tint = matDef?.baseColorFactor ?: MODEL_COLOR
                 instance.setParameter("color", tint[0], tint[1], tint[2], tint[3])
@@ -106,7 +105,12 @@ class ModelManager(
                     matDef?.metallicFactor ?: 0.05f,
                     matDef?.roughnessFactor ?: 0.55f,
                 )
-                instance.setParameter("baseColor", tex, sampler)
+                fun bind(name: String, tex: Pair<Texture, TextureSampler>) {
+                    instance.setParameter(name, tex.first, tex.second)
+                }
+                bind("baseColor", textureFor(matDef?.baseColorTexture, white))
+                bind("mrMap", textureFor(matDef?.metallicRoughnessTexture, white))
+                bind("normalMap", textureFor(matDef?.normalTexture, flatNormal))
                 lm.instances.add(instance)
 
                 val normals = prim.normals ?: generateFlatNormals(prim.positions)
@@ -195,31 +199,56 @@ class ModelManager(
         pos.rewind()
 
         // Filament stores normals as a quaternion tangent frame (TANGENTS,
-        // FLOAT4): pack (tangent, bitangent, normal) per vertex.
+        // FLOAT4): pack (tangent, bitangent, normal) per vertex. Prefer the
+        // glTF TANGENT attribute (UV-aligned, w = bitangent sign) so normal
+        // maps line up; fall back to any perpendicular when it's absent.
         val tang = alloc(vertexCount * 4)
         val q = FloatArray(4)
-        val t = FloatArray(3)
-        val b = FloatArray(3)
+        val primTan = prim.tangents
         for (v in 0 until vertexCount) {
             val nx = normals[v * 3]
             val ny = normals[v * 3 + 1]
             val nz = normals[v * 3 + 2]
-            // tangent: any unit vector perpendicular to the normal
-            val refX: Float; val refY: Float; val refZ: Float
-            if (kotlin.math.abs(nz) < 0.9f) { refX = 0f; refY = 0f; refZ = 1f }
-            else { refX = 1f; refY = 0f; refZ = 0f }
-            var tx = ny * refZ - nz * refY
-            var ty = nz * refX - nx * refZ
-            var tz = nx * refY - ny * refX
-            val tl = kotlin.math.sqrt(tx * tx + ty * ty + tz * tz)
-            if (tl > 1e-12f) { tx /= tl; ty /= tl; tz /= tl } else { tx = 1f; ty = 0f; tz = 0f }
-            // bitangent = n × t keeps (t, b, n) right-handed
-            b[0] = ny * tz - nz * ty
-            b[1] = nz * tx - nx * tz
-            b[2] = nx * ty - ny * tx
-            t[0] = tx; t[1] = ty; t[2] = tz
+            var tx = 0f
+            var ty = 0f
+            var tz = 0f
+            var sign = 1f
+            var ok = false
+            if (primTan != null && primTan.size >= (v + 1) * 4) {
+                tx = primTan[v * 4]
+                ty = primTan[v * 4 + 1]
+                tz = primTan[v * 4 + 2]
+                sign = if (primTan[v * 4 + 3] < 0f) -1f else 1f
+                // orthogonalize against the normal, then normalize
+                val d = tx * nx + ty * ny + tz * nz
+                tx -= nx * d
+                ty -= ny * d
+                tz -= nz * d
+                val tl = kotlin.math.sqrt(tx * tx + ty * ty + tz * tz)
+                if (tl > 1e-12f) {
+                    tx /= tl
+                    ty /= tl
+                    tz /= tl
+                    ok = true
+                }
+            }
+            if (!ok) {
+                val refX: Float; val refY: Float; val refZ: Float
+                if (kotlin.math.abs(nz) < 0.9f) { refX = 0f; refY = 0f; refZ = 1f }
+                else { refX = 1f; refY = 0f; refZ = 0f }
+                tx = ny * refZ - nz * refY
+                ty = nz * refX - nx * refZ
+                tz = nx * refY - ny * refX
+                val tl = kotlin.math.sqrt(tx * tx + ty * ty + tz * tz)
+                if (tl > 1e-12f) { tx /= tl; ty /= tl; tz /= tl } else { tx = 1f; ty = 0f; tz = 0f }
+                sign = 1f
+            }
+            // bitangent = sign · (n × t); sign flips handedness for the packer
+            val bx = sign * (ny * tz - nz * ty)
+            val by = sign * (nz * tx - nx * tz)
+            val bz = sign * (nx * ty - ny * tx)
             com.google.android.filament.MathUtils.packTangentFrame(
-                t[0], t[1], t[2], b[0], b[1], b[2], nx, ny, nz, q,
+                tx, ty, tz, bx, by, bz, nx, ny, nz, q,
             )
             q.forEach { tang.putFloat(it) }
         }
@@ -281,15 +310,23 @@ class ModelManager(
     private fun buildSolidTexture(): Pair<Texture, TextureSampler> {
         val tex = uploadRGBA(1, 1, byteArrayOf(-1, -1, -1, -1), srgb = true)
             ?: error("white texture upload failed")
-        val sampler = TextureSampler(
-            TextureSampler.MinFilter.LINEAR,
-            TextureSampler.MagFilter.LINEAR,
-            TextureSampler.WrapMode.REPEAT,
-            TextureSampler.WrapMode.REPEAT,
-            TextureSampler.WrapMode.REPEAT,
-        )
-        return tex to sampler
+        return tex to defaultSampler()
     }
+
+    /** 1×1 flat tangent-space normal (128,128,255 → (0,0,1) after *2-1). */
+    private fun buildFlatNormalTexture(): Pair<Texture, TextureSampler> {
+        val tex = uploadRGBA(1, 1, byteArrayOf(128.toByte(), 128.toByte(), -1, -1), srgb = false)
+            ?: error("flat-normal texture upload failed")
+        return tex to defaultSampler()
+    }
+
+    private fun defaultSampler() = TextureSampler(
+        TextureSampler.MinFilter.LINEAR,
+        TextureSampler.MagFilter.LINEAR,
+        TextureSampler.WrapMode.REPEAT,
+        TextureSampler.WrapMode.REPEAT,
+        TextureSampler.WrapMode.REPEAT,
+    )
 
     private fun uploadRGBA(w: Int, h: Int, px: ByteArray, srgb: Boolean): Texture? {
         val buf = ByteBuffer.allocateDirect(px.size).order(ByteOrder.nativeOrder())

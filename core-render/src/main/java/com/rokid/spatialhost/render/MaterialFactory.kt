@@ -90,11 +90,16 @@ object MaterialFactory {
     /**
      * Lit (PBR) material for imported glTF models: per-instance `color`
      * tint (baseColorFactor) × `baseColor` texture, metallic/roughness
-     * factors in the `mr` float2 (texture maps arrive with D2b).
+     * sampled from `mrMap` (B/G channels) scaled by the `mr` factors,
+     * tangent-space normal perturbation from `normalMap`.
      *
-     * Needs a directional light + camera exposure in the scene (D2c adds
-     * IBL for the full photoreal look). All lit renderables must supply
-     * POSITION + TANGENTS (quaternion frame) + UV0 vertex attributes.
+     * Per the Filament docs, `material.normal` is supplied in TANGENT space
+     * and assigned BEFORE prepareMaterial(). Needs a directional light +
+     * camera exposure (D2c adds IBL for correct metal response). All lit
+     * renderables must supply POSITION + TANGENTS (quaternion frame) + UV0.
+     *
+     * Missing maps bind white / flat-normal fallbacks so every primitive
+     * uses the same program (filamat has no material variants here).
      */
     fun buildLit(engine: Engine): Material? {
         ensureInitialized()
@@ -118,13 +123,30 @@ object MaterialFactory {
                     MaterialBuilder.ParameterPrecision.DEFAULT,
                     "baseColor",
                 )
+                .samplerParameter(
+                    MaterialBuilder.SamplerType.SAMPLER_2D,
+                    MaterialBuilder.SamplerFormat.FLOAT,
+                    MaterialBuilder.ParameterPrecision.DEFAULT,
+                    "mrMap",
+                )
+                .samplerParameter(
+                    MaterialBuilder.SamplerType.SAMPLER_2D,
+                    MaterialBuilder.SamplerFormat.FLOAT,
+                    MaterialBuilder.ParameterPrecision.DEFAULT,
+                    "normalMap",
+                )
                 .material(
+                    // Normal first, exactly as in the docs' normal-mapping
+                    // example (tangent space, +Z out of the surface).
                     "void material(inout MaterialInputs material) {" +
+                        "  material.normal =" +
+                        "      texture(materialParams_normalMap, getUV0()).xyz * 2.0 - 1.0;" +
                         "  prepareMaterial(material);" +
                         "  material.baseColor = materialParams.color *" +
                         "      texture(materialParams_baseColor, getUV0());" +
-                        "  material.roughness = materialParams.mr.y;" +
-                        "  material.metallic = materialParams.mr.x;" +
+                        "  vec4 mr = texture(materialParams_mrMap, getUV0());" +
+                        "  material.metallic = clamp(materialParams.mr.x * mr.b, 0.0, 1.0);" +
+                        "  material.roughness = clamp(materialParams.mr.y * mr.g, 0.04, 1.0);" +
                         "}",
                 )
                 .platform(MaterialBuilder.Platform.MOBILE)

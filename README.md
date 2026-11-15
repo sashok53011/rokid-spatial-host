@@ -20,6 +20,7 @@ bridges so the same app drives multiple headsets.
 | **D1a: glTF import (own GLB/glTF2 parser → Filament, lit material)** | ✅ DamagedHelmet demo renders |
 | **D1b: model pick / rotate / scale / local-file switch** | ✅ tap=pick, drag=rotate, wheel=scale, M=source |
 | **D2a: baseColor textures (hardware sRGB) + PBR factors** | ✅ DamagedHelmet textured |
+| **D2b: metallic-roughness + normal maps (glTF TANGENTS)** | ✅ verified on device |
 | Release build (debug-key signed, arm64-only ~26 MB) | ✅ |
 
 ## Build & run
@@ -132,7 +133,8 @@ stay isolated in `RokidMaxBridge.UXR_ENTRY_CANDIDATES`.
     - **D2a ✅**: baseColor textures (PNG/JPEG decode → hardware-sRGB RGBA8),
       per-primitive material instances, baseColorFactor/metallic/roughness
       uniforms, UV0 vertex stream.
-    - **D2b**: metallic-roughness + normal maps (glTF TANGENT frames).
+    - **D2b ✅**: metallic-roughness + normal maps, glTF TANGENT →
+      quaternion tangent frames (handedness via w sign).
     - **D2c**: IBL (prefiltered environment) for correct metal response.
   - **D3**: physics (Jolt) — scenes, gravity, collisions.
   - **D4**: OBJ/glTF export (round-trip).

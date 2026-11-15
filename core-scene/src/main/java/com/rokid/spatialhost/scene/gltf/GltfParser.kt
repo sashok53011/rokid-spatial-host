@@ -8,6 +8,7 @@ import java.nio.ByteOrder
  * One renderable chunk of geometry (triangle list, indexed).
  * Coordinates in model space; [uvs] optional (equirect/2D UV0).
  * [material] is an index into [GltfModel.materials] (null = default).
+ * [tangents] is the glTF TANGENT attribute (xyz + bitangent-sign w).
  */
 data class GltfPrimitive(
     val positions: FloatArray, // xyz triplets
@@ -15,6 +16,7 @@ data class GltfPrimitive(
     val uvs: FloatArray?,      // uv pairs or null
     val indices: IntArray,
     val material: Int? = null,
+    val tangents: FloatArray? = null, // xyzw per vertex or null
 ) {
     /** Local-space AABB of this primitive. */
     val boundsMin: FloatArray
@@ -254,12 +256,14 @@ object GltfParser {
                         readFloats(accessors[attrs.getInt("NORMAL")], buffers, bufferViews, 3) else null
                     val uv = if (attrs.has("TEXCOORD_0"))
                         readFloats(accessors[attrs.getInt("TEXCOORD_0")], buffers, bufferViews, 2) else null
+                    val tan = if (attrs.has("TANGENT"))
+                        readFloats(accessors[attrs.getInt("TANGENT")], buffers, bufferViews, 4) else null
                     val idx = if (prim.has("indices"))
                         readIndices(accessors[prim.getInt("indices")], buffers, bufferViews)
                     else IntArray(pos.size / 3) { it }
                     if (pos.isEmpty() || idx.isEmpty()) continue
                     val matIdx = if (prim.has("material")) prim.getInt("material") else null
-                    out.add(GltfPrimitive(pos, nrm, uv, idx, matIdx))
+                    out.add(GltfPrimitive(pos, nrm, uv, idx, matIdx, tan))
                 }
                 if (out.isNotEmpty()) primitives[m] = out
             }
