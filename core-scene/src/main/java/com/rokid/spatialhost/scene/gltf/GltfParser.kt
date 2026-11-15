@@ -1,0 +1,401 @@
+package com.rokid.spatialhost.scene.gltf
+
+import org.json.JSONObject
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+
+/**
+ * One renderable chunk of geometry (triangle list, indexed).
+ * Coordinates in model space; [uvs] optional (equirect/2D UV0).
+ */
+data class GltfPrimitive(
+    val positions: FloatArray, // xyz triplets
+    val normals: FloatArray?,  // xyz triplets or null
+    val uvs: FloatArray?,      // uv pairs or null
+    val indices: IntArray,
+) {
+    /** Local-space AABB of this primitive. */
+    val boundsMin: FloatArray
+    val boundsMax: FloatArray
+
+    init {
+        var minx = Float.MAX_VALUE; var miny = Float.MAX_VALUE; var minz = Float.MAX_VALUE
+        var maxx = -Float.MAX_VALUE; var maxy = -Float.MAX_VALUE; var maxz = -Float.MAX_VALUE
+        var i = 0
+        while (i + 2 < positions.size) {
+            val x = positions[i]; val y = positions[i + 1]; val z = positions[i + 2]
+            if (x < minx) minx = x; if (y < miny) miny = y; if (z < minz) minz = z
+            if (x > maxx) maxx = x; if (y > maxy) maxy = y; if (z > maxz) maxz = z
+            i += 3
+        }
+        boundsMin = floatArrayOf(minx, miny, minz)
+        boundsMax = floatArrayOf(maxx, maxy, maxz)
+    }
+}
+
+/** Scene-graph node: local transform + optional mesh reference. */
+data class GltfNode(
+    val name: String,
+    val matrix: FloatArray, // local transform, column-major (glTF convention)
+    val children: IntArray,
+    val mesh: Int?,
+)
+
+/**
+ * Parsed glTF2.0 model (MVP scope: static geometry).
+ *
+ * Supported: GLB containers, embedded `data:` buffers and external buffers
+ * resolved via [basePathResolver]; POSITION/NORMAL/TEXCOORD_0 attributes;
+ * SCALAR/VEC2/VEC3 accessors (f32/u16/u32, strided or packed); node
+ * matrix | TRS transforms with hierarchy.
+ *
+ * Out of scope for now (Phase D2+): materials/textures/samplers, skins,
+ * morph targets, animations — every primitive renders with the app's lit
+ * material (textures land in D2).
+ */
+data class GltfModel(
+    /** mesh index → primitives */
+    val primitives: Map<Int, List<GltfPrimitive>>,
+    val nodes: List<GltfNode>,
+    val sceneRootNodes: IntArray,
+    /** Model-space bounds after node hierarchy transforms (before app placement). */
+    val boundsMin: FloatArray,
+    val boundsMax: FloatArray,
+    val name: String,
+) {
+    /** Total primitive count (progress/logging). */
+    val primitiveCount: Int get() = primitives.values.sumOf { it.size }
+}
+
+object GltfParser {
+
+    private const val TAG = "GltfParser"
+
+    /**
+     * @param bytes        .glb file bytes (or .gltf JSON bytes)
+     * @param defaultName  label used when the asset has none
+     * @param basePathResolver resolves relative external .bin uris (file access)
+     */
+    fun parse(
+        bytes: ByteArray,
+        defaultName: String = "model",
+        basePathResolver: ((String) -> ByteArray?)? = null,
+    ): GltfModel {
+        val (jsonStr, binChunk) = splitContainer(bytes)
+        val root = JSONObject(jsonStr)
+
+        val buffersJson = root.optJSONArray("buffers")
+        val buffers = arrayOfNulls<ByteArray>(buffersJson?.length() ?: 0)
+        buffersJson?.let { arr ->
+            for (i in 0 until arr.length()) {
+                val b = arr.getJSONObject(i)
+                val uri = b.optString("uri")
+                buffers[i] = when {
+                    uri.isEmpty() -> binChunk
+                        ?: throw IllegalArgumentException("buffer[$i] has no uri and no GLB BIN chunk")
+
+                    uri.startsWith("data:") -> {
+                        val idx = uri.indexOf("base64,")
+                        require(idx > 0) { "non-base64 data uri unsupported" }
+                        android.util.Base64.decode(uri.substring(idx + 7), android.util.Base64.DEFAULT)
+                    }
+
+                    else -> basePathResolver?.invoke(uri)
+                        ?: throw IllegalArgumentException("external buffer not resolvable: $uri")
+                }
+            }
+        }
+
+        val bufferViews = root.optJSONArray("bufferViews")?.let { arr ->
+            Array(arr.length()) { i ->
+                val v = arr.getJSONObject(i)
+                BufferView(
+                    buffer = v.getInt("buffer"),
+                    byteOffset = v.optInt("byteOffset", 0),
+                    byteStride = v.optInt("byteStride", 0),
+                )
+            }
+        } ?: emptyArray()
+
+        val accessors = root.optJSONArray("accessors")?.let { arr ->
+            Array(arr.length()) { i ->
+                val a = arr.getJSONObject(i)
+                Accessor(
+                    bufferView = a.optInt("bufferView", -1),
+                    byteOffset = a.optInt("byteOffset", 0),
+                    componentType = a.getInt("componentType"),
+                    count = a.getInt("count"),
+                    type = a.getString("type"),
+                )
+            }
+        } ?: emptyArray()
+
+        // --- meshes ---
+        val primitives = mutableMapOf<Int, List<GltfPrimitive>>()
+        root.optJSONArray("meshes")?.let { meshes ->
+            for (m in 0 until meshes.length()) {
+                val mesh = meshes.getJSONObject(m)
+                val prims = mesh.optJSONArray("primitives") ?: continue
+                val out = mutableListOf<GltfPrimitive>()
+                for (p in 0 until prims.length()) {
+                    val prim = prims.getJSONObject(p)
+                    val attrs = prim.getJSONObject("attributes")
+                    if (!attrs.has("POSITION")) continue
+                    val pos = readFloats(accessors[attrs.getInt("POSITION")], buffers, bufferViews, 3)
+                    val nrm = if (attrs.has("NORMAL"))
+                        readFloats(accessors[attrs.getInt("NORMAL")], buffers, bufferViews, 3) else null
+                    val uv = if (attrs.has("TEXCOORD_0"))
+                        readFloats(accessors[attrs.getInt("TEXCOORD_0")], buffers, bufferViews, 2) else null
+                    val idx = if (prim.has("indices"))
+                        readIndices(accessors[prim.getInt("indices")], buffers, bufferViews)
+                    else IntArray(pos.size / 3) { it }
+                    if (pos.isEmpty() || idx.isEmpty()) continue
+                    out.add(GltfPrimitive(pos, nrm, uv, idx))
+                }
+                if (out.isNotEmpty()) primitives[m] = out
+            }
+        }
+
+        // --- nodes ---
+        val nodesJson = root.optJSONArray("nodes")
+        val nodes = nodesJson?.let { arr ->
+            Array(arr.length()) { i ->
+                val n = arr.getJSONObject(i)
+                val children = n.optJSONArray("children")?.let { c ->
+                    IntArray(c.length()) { c.getInt(it) }
+                } ?: IntArray(0)
+                val matrix = if (n.has("matrix")) {
+                    val m = n.getJSONArray("matrix")
+                    FloatArray(16) { m.getDouble(it).toFloat() }
+                } else {
+                    trsMatrix(
+                        jsonArrayFloats(n, "translation", 0f, 3),
+                        jsonArrayFloats(n, "rotation", 0f, 4, wDefault = 1f),
+                        jsonArrayFloats(n, "scale", 1f, 3),
+                    )
+                }
+                GltfNode(n.optString("name", "node$i"), matrix, children, if (n.has("mesh")) n.getInt("mesh") else null)
+            }
+        } ?: emptyArray()
+
+        val roots = root.optJSONArray("scenes")?.let { scenes ->
+            val s = scenes.getJSONObject(root.optInt("scene", 0))
+            val nodesArr = s.optJSONArray("nodes") ?: return@let IntArray(0)
+            IntArray(nodesArr.length()) { nodesArr.getInt(it) }
+        } ?: if (nodes.isNotEmpty()) intArrayOf(0) else IntArray(0)
+
+        // --- model-space bounds (walk hierarchy, transform primitive bounds) ---
+        var min = floatArrayOf(Float.MAX_VALUE, Float.MAX_VALUE, Float.MAX_VALUE)
+        var max = floatArrayOf(-Float.MAX_VALUE, -Float.MAX_VALUE, -Float.MAX_VALUE)
+        fun walk(nodeIdx: Int, parent: FloatArray) {
+            if (nodeIdx !in nodes.indices) return
+            val node = nodes[nodeIdx]
+            val world = matMul(parent, node.matrix)
+            node.mesh?.let { meshIdx ->
+                primitives[meshIdx]?.forEach { prim ->
+                    // transform the 8 AABB corners
+                    val bmin = prim.boundsMin; val bmax = prim.boundsMax
+                    for (cx in 0..1) for (cy in 0..1) for (cz in 0..1) {
+                        val lx = if (cx == 0) bmin[0] else bmax[0]
+                        val ly = if (cy == 0) bmin[1] else bmax[1]
+                        val lz = if (cz == 0) bmin[2] else bmax[2]
+                        val w = matTransform(world, lx, ly, lz)
+                        for (k in 0..2) {
+                            if (w[k] < min[k]) min[k] = w[k]
+                            if (w[k] > max[k]) max[k] = w[k]
+                        }
+                    }
+                }
+            }
+            for (c in node.children) walk(c, world)
+        }
+        val identity = floatArrayOf(
+            1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 1f,
+        )
+        for (r in roots) walk(r, identity)
+
+        if (min[0] > max[0]) { // no geometry bounds (empty model)
+            min = floatArrayOf(-1f, -1f, -1f); max = floatArrayOf(1f, 1f, 1f)
+        }
+
+        val name = root.optJSONObject("asset")?.optString("generator")?.takeIf { it.isNotBlank() }
+            ?: defaultName
+        return GltfModel(primitives, nodes.toList(), roots, min, max, name)
+    }
+
+    // ------------------------------------------------------------------
+    // container / accessor helpers
+    // ------------------------------------------------------------------
+
+    private class BufferView(val buffer: Int, val byteOffset: Int, val byteStride: Int)
+    private class Accessor(
+        val bufferView: Int,
+        val byteOffset: Int,
+        val componentType: Int,
+        val count: Int,
+        val type: String,
+    )
+
+    private fun componentsOf(type: String): Int = when (type) {
+        "SCALAR" -> 1
+        "VEC2" -> 2
+        "VEC3" -> 3
+        "VEC4" -> 4
+        else -> throw IllegalArgumentException("accessor type $type unsupported")
+    }
+
+    private fun componentBytes(componentType: Int): Int = when (componentType) {
+        5120 -> 1 // BYTE
+        5121 -> 1 // UBYTE
+        5122 -> 2 // SHORT
+        5123 -> 2 // USHORT
+        5125 -> 4 // UINT
+        5126 -> 4 // FLOAT
+        else -> throw IllegalArgumentException("componentType $componentType unsupported")
+    }
+
+    private fun readFloats(
+        acc: Accessor,
+        buffers: Array<ByteArray?>,
+        views: Array<BufferView>,
+        wantComponents: Int,
+    ): FloatArray {
+        if (acc.bufferView < 0) return FloatArray(acc.count * wantComponents)
+        val view = views[acc.bufferView]
+        val buf = buffers[view.buffer]
+            ?: throw IllegalArgumentException("buffer ${view.buffer} missing")
+        val comps = componentsOf(acc.type)
+        val elemBytes = componentBytes(acc.componentType) * comps
+        val stride = if (view.byteStride > 0) view.byteStride else elemBytes
+        val base = view.byteOffset + acc.byteOffset
+        val bb = ByteBuffer.wrap(buf).order(ByteOrder.LITTLE_ENDIAN)
+        val out = FloatArray(acc.count * wantComponents)
+        for (i in 0 until acc.count) {
+            val elem = base + i * stride
+            for (c in 0 until wantComponents) {
+                val off = elem + c * componentBytes(acc.componentType)
+                out[i * wantComponents + c] = when (acc.componentType) {
+                    5126 -> bb.getFloat(off)
+                    5125 -> bb.getInt(off).toFloat()
+                    5123 -> (bb.getShort(off).toInt() and 0xFFFF).toFloat()
+                    5121 -> (bb.get(off).toInt() and 0xFF).toFloat()
+                    else -> bb.getFloat(off)
+                }
+            }
+        }
+        // scissor accessors (component count > requested) handled by `wantComponents`
+        return out
+    }
+
+    private fun readIndices(
+        acc: Accessor,
+        buffers: Array<ByteArray?>,
+        views: Array<BufferView>,
+    ): IntArray {
+        val view = views[acc.bufferView]
+        val buf = buffers[view.buffer]
+            ?: throw IllegalArgumentException("buffer ${view.buffer} missing")
+        val elemBytes = componentBytes(acc.componentType)
+        val stride = if (view.byteStride > 0) view.byteStride else elemBytes
+        val base = view.byteOffset + acc.byteOffset
+        val bb = ByteBuffer.wrap(buf).order(ByteOrder.LITTLE_ENDIAN)
+        val out = IntArray(acc.count)
+        for (i in 0 until acc.count) {
+            val off = base + i * stride
+            out[i] = when (acc.componentType) {
+                5123 -> bb.getShort(off).toInt() and 0xFFFF
+                5125 -> bb.getInt(off)
+                5121 -> bb.get(off).toInt() and 0xFF
+                else -> bb.getShort(off).toInt() and 0xFFFF
+            }
+        }
+        return out
+    }
+
+    private data class Chunk(val type: Int, val data: ByteArray)
+
+    private fun splitContainer(bytes: ByteArray): Pair<String, ByteArray?> {
+        val bb = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+        // GLB: magic 'glTF' | version | length | chunks
+        if (bytes.size > 12 && bb.int == 0x46546C67) { // 'glTF'
+            bb.int // version
+            bb.int // total length
+            var json: String? = null
+            var bin: ByteArray? = null
+            while (bb.remaining() >= 8) {
+                val len = bb.int
+                val type = bb.int
+                val data = ByteArray(len)
+                bb.get(data)
+                if (len % 4 != 0) bb.position(bb.position() + (4 - len % 4)) // pad
+                when (type) {
+                    0x4E4F534A -> json = String(data, Charsets.UTF_8) // 'JSON'
+                    0x004E4942 -> bin = data // 'BIN\0'
+                }
+            }
+            return Pair(json ?: throw IllegalArgumentException("GLB has no JSON chunk"), bin)
+        }
+        // Plain .gltf JSON (embedded base64 buffers resolved later)
+        return Pair(String(bytes, Charsets.UTF_8), null)
+    }
+
+    /** translation/rotation(quat x,y,z,w at index0)/scale → column-major matrix. */
+    private fun trsMatrix(t: FloatArray, r: FloatArray, s: FloatArray): FloatArray {
+        val (qx, qy, qz, qw) = floatArrayOf(r[0], r[1], r[2], r[3])
+        // rotation matrix (column-major)
+        val m00 = 1f - 2f * (qy * qy + qz * qz)
+        val m01 = 2f * (qx * qy - qz * qw)
+        val m02 = 2f * (qx * qz + qy * qw)
+        val m10 = 2f * (qx * qy + qz * qw)
+        val m11 = 1f - 2f * (qx * qx + qz * qz)
+        val m12 = 2f * (qy * qz - qx * qw)
+        val m20 = 2f * (qx * qz - qy * qw)
+        val m21 = 2f * (qy * qz + qx * qw)
+        val m22 = 1f - 2f * (qx * qx + qy * qy)
+        return floatArrayOf(
+            m00 * s[0], m10 * s[0], m20 * s[0], 0f,
+            m01 * s[1], m11 * s[1], m21 * s[1], 0f,
+            m02 * s[2], m12 * s[2], m22 * s[2], 0f,
+            t[0], t[1], t[2], 1f,
+        )
+    }
+
+    /** column-major A·B (both glTF style). */
+    fun matMul(a: FloatArray, b: FloatArray): FloatArray {
+        val out = FloatArray(16)
+        for (col in 0..3) {
+            for (row in 0..3) {
+                var sum = 0f
+                for (k in 0..3) sum += a[k * 4 + row] * b[col * 4 + k]
+                out[col * 4 + row] = sum
+            }
+        }
+        return out
+    }
+
+    /** Transform point by column-major matrix (w = 1). */
+    fun matTransform(m: FloatArray, x: Float, y: Float, z: Float): FloatArray {
+        return floatArrayOf(
+            m[0] * x + m[4] * y + m[8] * z + m[12],
+            m[1] * x + m[5] * y + m[9] * z + m[13],
+            m[2] * x + m[6] * y + m[10] * z + m[14],
+        )
+    }
+
+    /** translation[3] / rotation[4, xyzw] / scale[3] reader with defaults. */
+    private fun jsonArrayFloats(
+        n: JSONObject,
+        key: String,
+        def: Float,
+        expected: Int,
+        wDefault: Float = def,
+    ): FloatArray {
+        val arr = n.optJSONArray(key)
+            ?: return FloatArray(expected) { if (expected == 4 && it == 3) wDefault else def }
+        return FloatArray(expected) {
+            if (it < arr.length()) arr.getDouble(it).toFloat()
+            else if (expected == 4 && it == 3) wDefault
+            else def
+        }
+    }
+}

@@ -88,6 +88,56 @@ object MaterialFactory {
     }
 
     /**
+     * Lit (PBR) material with a per-instance `color` — for glTF models.
+     * Needs a directional light + camera exposure in the scene (D2 adds IBL
+     * for the full photoreal look).
+     */
+    fun buildLit(engine: Engine): Material? {
+        ensureInitialized()
+        val pkg = try {
+            MaterialBuilder()
+                .name("lit_color")
+                .materialDomain(MaterialBuilder.MaterialDomain.SURFACE)
+                .shading(MaterialBuilder.Shading.LIT)
+                .blending(MaterialBuilder.BlendingMode.OPAQUE)
+                .culling(MaterialBuilder.CullingMode.BACK)
+                .require(MaterialBuilder.VertexAttribute.POSITION)
+                // Filament encodes normals as a quaternion TANGENTS frame
+                // ("TANGENTS ... is how normals are specified").
+                .require(MaterialBuilder.VertexAttribute.TANGENTS)
+                .uniformParameter(MaterialBuilder.UniformType.FLOAT4, "color")
+                .material(
+                    "void material(inout MaterialInputs material) {" +
+                        "  prepareMaterial(material);" +
+                        "  material.baseColor = materialParams.color;" +
+                        "  material.roughness = 0.55;" +
+                        "  material.metallic = 0.05;" +
+                        "}",
+                )
+                .platform(MaterialBuilder.Platform.MOBILE)
+                .targetApi(MaterialBuilder.TargetApi.ALL)
+                .optimization(MaterialBuilder.Optimization.PERFORMANCE)
+                .build()
+        } catch (t: Throwable) {
+            Log.e(TAG, "lit_color build threw", t)
+            return null
+        }
+        if (!pkg.isValid) {
+            Log.e(TAG, "lit_color package invalid")
+            return null
+        }
+        return try {
+            val buf = pkg.buffer
+            val material = Material.Builder().payload(buf, buf.remaining()).build(engine)
+            Log.i(TAG, "lit_color compiled (${buf.remaining()} bytes)")
+            material
+        } catch (t: Throwable) {
+            Log.e(TAG, "lit_color Material.Builder failed", t)
+            null
+        }
+    }
+
+    /**
      * Unlit textured material for the 360° video sphere: samples an EXTERNAL
      * sampler (the camera/stream SurfaceTexture wrapped by a Filament Stream).
      *

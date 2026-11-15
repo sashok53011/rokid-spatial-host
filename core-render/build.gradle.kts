@@ -29,4 +29,6 @@ dependencies {
     implementation(libs.filament.android)
     implementation(libs.filament.utils)
     implementation(libs.filamat.android)
+    // glTF model placement mirrors core-scene's SpatialPanel types
+    implementation(project(":core-scene"))
 }

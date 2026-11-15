@@ -12,6 +12,8 @@ import com.google.android.filament.Camera
 import com.google.android.filament.Engine
 import com.google.android.filament.EntityManager
 import com.google.android.filament.Filament
+import com.google.android.filament.IndexBuffer
+import com.google.android.filament.LightManager
 import com.google.android.filament.Material
 import com.google.android.filament.MaterialInstance
 import com.google.android.filament.RenderableManager
@@ -23,6 +25,7 @@ import com.google.android.filament.Texture
 import com.google.android.filament.TextureSampler
 import com.google.android.filament.View
 import com.google.android.filament.Viewport
+import com.rokid.spatialhost.scene.gltf.GltfModel
 
 /** Panel description pushed from the app (mirrors core-scene's SpatialPanel). */
 data class PanelSpec(
@@ -104,6 +107,14 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
         pendingColor = onDone
     }
 
+    /** Load a parsed glTF model (D1) with its placement matrix. */
+    @Volatile
+    private var pendingModel: Pair<GltfModel, FloatArray>? = null
+
+    fun requestModel(model: GltfModel, matrix: FloatArray) {
+        pendingModel = model to matrix
+    }
+
     private var thread: Thread? = null
 
     @Volatile
@@ -168,10 +179,13 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
         val engine: Engine,
         val scene: Scene,
         val colorMaterial: Material?,
+        val litMaterial: Material?,
         val sphereMesh: Mesh,
         val quadMesh: Mesh,
         var sphereEntity: Int,
         var sphereInstance: MaterialInstance?,
+        val lightEntity: Int,
+        val modelManager: ModelManager,
         val panelEntities: MutableMap<String, Int> = mutableMapOf(),
         val panelInstances: MutableMap<String, MaterialInstance?> = mutableMapOf(),
         // video sphere resources (created lazily by requestVideoSphere)
@@ -226,11 +240,27 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
             // (same approach as sample-material-builder's diagnostics note).
             v.isPostProcessingEnabled = false
             Log.i(TAG, "post-processing disabled")
+            // Physical camera exposure for lit materials (sunny f/16, as in
+            // Filament's material-builder sample).
+            c.setExposure(16.0f, 1.0f / 125.0f, 100.0f)
 
             // --- content -------------------------------------------------
             val colorMaterial = MaterialFactory.buildColorUnlit(e)
+            val litMaterial = MaterialFactory.buildLit(e)
             val sphereMesh = Meshes.createSphere(e, radius = 30f)
             val quadMesh = Meshes.createQuad(e)
+
+            // Key light for lit models (D2 replaces/extends with IBL).
+            // Direction points where light TRAVELS: from behind/above the
+            // viewer forward so the camera-facing side of models is lit.
+            val lightEntity = EntityManager.get().create()
+            LightManager.Builder(LightManager.Type.DIRECTIONAL)
+                .color(1.0f, 0.98f, 0.94f)
+                .intensity(110_000f) // clear-day lux, as in Filament's samples
+                .direction(0.2f, -0.6f, -1.0f)
+                .castShadows(false)
+                .build(e, lightEntity)
+            s.addEntity(lightEntity)
 
             val sphereInstance = colorMaterial?.createInstance()
             sphereInstance?.setParameter(
@@ -247,10 +277,13 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
                 engine = e,
                 scene = s,
                 colorMaterial = colorMaterial,
+                litMaterial = litMaterial,
                 sphereMesh = sphereMesh,
                 quadMesh = quadMesh,
                 sphereEntity = sphereEntity,
                 sphereInstance = sphereInstance,
+                lightEntity = lightEntity,
+                modelManager = ModelManager(e, s, litMaterial),
             )
             Log.i(
                 TAG,
@@ -284,6 +317,13 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
 
                 applyPendingPanels()
                 applyFocus()
+
+                // glTF model (D1)
+                pendingModel?.let { (model, matrix) ->
+                    pendingModel = null
+                    sceneState?.modelManager?.load(model, matrix)
+                    Log.i(TAG, "model placement: " + (sceneState?.modelManager?.debugBounds(model.boundsMin, model.boundsMax) ?: "?"))
+                }
 
                 // Video/color sphere requests (color FIRST so a rapid
                 // stop→start pair resolves in the right order within a frame).
@@ -565,6 +605,7 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
 
     private fun destroySceneState(st: SceneState) {
         val e = st.engine
+        st.modelManager.release()
         for (entity in st.panelEntities.values) {
             st.scene.removeEntity(entity)
             e.destroyEntity(entity)
@@ -581,7 +622,9 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
         st.videoMaterial?.let { e.destroyMaterial(it) }
         st.sphereMesh.destroy(e)
         st.quadMesh.destroy(e)
+        st.litMaterial?.let { e.destroyMaterial(it) }
         st.colorMaterial?.let { e.destroyMaterial(it) }
+        e.destroyEntity(st.lightEntity)
         MaterialFactory.shutdown()
     }
 

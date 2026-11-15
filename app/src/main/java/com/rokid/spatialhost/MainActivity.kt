@@ -195,9 +195,55 @@ class MainActivity : Activity() {
         // Sources must exist before the auto-start timer fires.
         videoSources.addAll(PUBLIC_SOURCES)
         scanLocalVideos()
+        loadDemoModel()
 
         Log.i(TAG, UsbDiagnostics.describe(getSystemService(Context.USB_SERVICE) as UsbManager))
         connectChain()
+    }
+
+    /**
+     * Phase D1: parse the bundled demo glTF and place it in front of the user
+     * (auto-fit to ~1.1 m at (0, 0.1, -2.2)).
+     */
+    private fun loadDemoModel() {
+        scope.launch {
+            try {
+                val bytes = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    assets.open("models/DamagedHelmet.glb").use { it.readBytes() }
+                }
+                val model = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    com.rokid.spatialhost.scene.gltf.GltfParser.parse(bytes, "DamagedHelmet")
+                }
+                Log.i(
+                    TAG,
+                    "parsed ${model.name}: nodes=${model.nodes.size} prims=${model.primitiveCount} " +
+                        "bounds=${model.boundsMin.joinToString("/") { "%.2f".format(it) }}.." +
+                        "${model.boundsMax.joinToString("/") { "%.2f".format(it) }}",
+                )
+                val ext = maxOf(
+                    model.boundsMax[0] - model.boundsMin[0],
+                    model.boundsMax[1] - model.boundsMin[1],
+                    model.boundsMax[2] - model.boundsMin[2],
+                ).coerceAtLeast(1e-3f)
+                val scale = 1.1f / ext
+                val cx = (model.boundsMin[0] + model.boundsMax[0]) / 2f
+                val cy = (model.boundsMin[1] + model.boundsMax[1]) / 2f
+                val cz = (model.boundsMin[2] + model.boundsMax[2]) / 2f
+                // M = T(p) * S * T(-c): scale about the model center, then place
+                val placement = floatArrayOf(
+                    scale, 0f, 0f, 0f,
+                    0f, scale, 0f, 0f,
+                    0f, 0f, scale, 0f,
+                    0f - scale * cx,
+                    0.1f - scale * cy,
+                    -2.2f - scale * cz,
+                    1f,
+                )
+                renderer.requestModel(model, placement)
+            } catch (t: Throwable) {
+                Log.e(TAG, "demo model load failed", t)
+            }
+        }
     }
 
     /**
