@@ -48,6 +48,7 @@ dependencies {
     implementation(project(":core-input"))
     implementation(project(":core-video"))
     implementation(project(":core-battery"))
+    implementation(project(":core-physics"))
 
     implementation(libs.kotlin.stdlib)
     implementation(libs.coroutines.android)

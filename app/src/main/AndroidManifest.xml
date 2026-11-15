@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -7,6 +8,10 @@
 
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />
     <uses-feature android:name="android.hardware.sensor.gyroscope" android:required="false" />
+
+    <!-- jolt-jni declares minSdk 33 but only needs JNI + basic runtime APIs;
+         the target box runs Android 12 (API 31). -->
+    <uses-sdk tools:overrideLibrary="com.github.stephengold.joltjni" />
 
     <application
         android:allowBackup="true"

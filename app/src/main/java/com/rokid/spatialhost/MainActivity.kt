@@ -170,6 +170,36 @@ class MainActivity : Activity() {
             val s = baseScale * userScale
             return invRot(floatArrayOf(d[0] / s, d[1] / s, d[2] / s))
         }
+
+        /**
+         * Placement from an EXTERNAL transform (physics body): column-major
+         * T(pos)·R(quat xyzw)·S·T(−center) — same layout as [matrix].
+         */
+        fun matrixWith(pos: FloatArray, quat: FloatArray): FloatArray {
+            val s = baseScale * userScale
+            val qx = quat[0]
+            val qy = quat[1]
+            val qz = quat[2]
+            val qw = quat[3]
+            val m00 = 1f - 2f * (qy * qy + qz * qz)
+            val m01 = 2f * (qx * qy - qz * qw)
+            val m02 = 2f * (qx * qz + qy * qw)
+            val m10 = 2f * (qx * qy + qz * qw)
+            val m11 = 1f - 2f * (qx * qx + qz * qz)
+            val m12 = 2f * (qy * qz - qx * qw)
+            val m20 = 2f * (qx * qz - qy * qw)
+            val m21 = 2f * (qy * qz + qx * qw)
+            val m22 = 1f - 2f * (qx * qx + qy * qy)
+            val rc0 = m00 * center[0] + m01 * center[1] + m02 * center[2]
+            val rc1 = m10 * center[0] + m11 * center[1] + m12 * center[2]
+            val rc2 = m20 * center[0] + m21 * center[1] + m22 * center[2]
+            return floatArrayOf(
+                m00 * s, m10 * s, m20 * s, 0f,
+                m01 * s, m11 * s, m21 * s, 0f,
+                m02 * s, m12 * s, m22 * s, 0f,
+                pos[0] - s * rc0, pos[1] - s * rc1, pos[2] - s * rc2, 1f,
+            )
+        }
     }
 
     private data class ModelFile(val label: String, val path: String)
@@ -178,6 +208,78 @@ class MainActivity : Activity() {
     private val sceneModels = mutableListOf<ModelObject>()
     private val localModelFiles = mutableListOf<ModelFile>()
     private var modelSourceIndex = 0 // 0 = bundled demo, 1.. = local files
+
+    // ------------------------------------------------------------------
+    // D3: rigid-body physics (Jolt). While active the physics body drives
+    // the model transform; manual rotate/scale stand down.
+    // ------------------------------------------------------------------
+
+    private val physics = com.rokid.spatialhost.physics.PhysicsWorld()
+    private var physicsActive = false
+
+    private val physicsTick = object : Runnable {
+        override fun run() {
+            if (!physicsActive) return
+            try {
+                physics.step(FIXED_PHYSICS_DT)
+                val obj = sceneModels.firstOrNull()
+                val pos = physics.modelPosition()
+                val rot = physics.modelRotation()
+                if (obj != null && pos != null && rot != null) {
+                    obj.pos[0] = pos[0]
+                    obj.pos[1] = pos[1]
+                    obj.pos[2] = pos[2]
+                    renderer.setModelTransform(obj.matrixWith(pos, rot))
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "physics tick failed — physics OFF", t)
+                physicsActive = false
+                return
+            }
+            mainHandler.postDelayed(this, 16)
+        }
+    }
+
+    /** P: the model becomes a dynamic body and drops onto the floor. */
+    private fun togglePhysics() {
+        if (physicsActive) {
+            physicsActive = false
+            mainHandler.removeCallbacks(physicsTick)
+            // Keep the model where it landed.
+            val obj = sceneModels.firstOrNull()
+            val pos = physics.modelPosition()
+            val rot = physics.modelRotation()
+            if (obj != null && pos != null && rot != null) {
+                obj.pos[0] = pos[0]
+                obj.pos[1] = pos[1]
+                obj.pos[2] = pos[2]
+                val e = com.rokid.spatialhost.bridge.Quat.toEulerYXZ(rot)
+                obj.yawRad = e[0]
+                obj.pitchRad = e[1]
+                renderer.setModelTransform(obj.matrix())
+            }
+            physics.removeModel()
+            Log.i(TAG, "physics OFF — model kept at ${pos?.joinToString { "%.2f".format(it) }}")
+        } else {
+            val obj = sceneModels.firstOrNull()
+            if (obj == null) {
+                Log.i(TAG, "physics: no model loaded")
+                return
+            }
+            if (!physics.ensureInit()) return
+            physics.addFloor(FLOOR_TOP_Y, obj.pos[0], obj.pos[2])
+            val s = obj.baseScale * obj.userScale
+            physics.addModelBox(
+                obj.pos[0], obj.pos[1], obj.pos[2],
+                (obj.boundsMax[0] - obj.boundsMin[0]) / 2f * s,
+                (obj.boundsMax[1] - obj.boundsMin[1]) / 2f * s,
+                (obj.boundsMax[2] - obj.boundsMin[2]) / 2f * s,
+            )
+            physicsActive = true
+            mainHandler.post(physicsTick)
+            Log.i(TAG, "physics ON — drop from y=${"%.2f".format(obj.pos[1])} to floor $FLOOR_TOP_Y")
+        }
+    }
 
     /** Camera orientation = head pose ⊗ manual look offset. */
     private fun currentCameraQuat(): FloatArray {
@@ -548,7 +650,7 @@ class MainActivity : Activity() {
 
                 MotionEvent.ACTION_SCROLL -> {
                     val wheel = ev.getAxisValue(MotionEvent.AXIS_VSCROLL)
-                    val obj = if (modelSelected) sceneModels.firstOrNull() else null
+                    val obj = if (modelSelected && !physicsActive) sceneModels.firstOrNull() else null
                     if (obj != null && wheel != 0f) {
                         // Selected model: wheel scales it (else wheel = next video).
                         val step = if (wheel > 0f) 1.12f else 1f / 1.12f
@@ -565,7 +667,7 @@ class MainActivity : Activity() {
                     val dy = ev.y - lastY
                     if (hypot(dx, dy) > 8f) moved = true
                     if (moved) {
-                        val obj = if (modelSelected) sceneModels.firstOrNull() else null
+                        val obj = if (modelSelected && !physicsActive) sceneModels.firstOrNull() else null
                         if (obj != null) {
                             // Drag rotates the selected model (grab-the-surface
                             // feel) instead of steering the view.
@@ -622,6 +724,11 @@ class MainActivity : Activity() {
 
             KeyEvent.KEYCODE_M -> {
                 nextModelSource()
+                return true
+            }
+
+            KeyEvent.KEYCODE_P -> {
+                togglePhysics()
                 return true
             }
         }
@@ -805,6 +912,14 @@ class MainActivity : Activity() {
             } else {
                 append("model  : loading…\n")
             }
+            if (physicsActive || physics.isInitialized) {
+                val p = physics.modelPosition()
+                append(
+                    "physics: ${if (physicsActive) "ON" else "OFF"}" +
+                        (p?.let { " · y=${"%.2f".format(it[1])}" } ?: "") +
+                        " · floor $FLOOR_TOP_Y m (P=toggle)\n",
+                )
+            }
             append(
                 "power  : ${stats.mahUsed.toInt()} mAh · ${"%.0f".format(stats.drainMa)} mA · " +
                     (if (stats.batteryPercent in 0..100) "${stats.batteryPercent}%" else "?") +
@@ -869,6 +984,10 @@ class MainActivity : Activity() {
          */
         private const val AUTO_START_VIDEO = true
         private const val MAX_LOOK_PITCH = 1.45f // ≈83°
+
+        /** D3: fixed physics step (the tick runs every 16 ms). */
+        private const val FIXED_PHYSICS_DT = 1f / 60f
+        private const val FLOOR_TOP_Y = -1.0f // floor surface, world meters
 
         /** Verified-live public sources (wheel = next). */
         private val PUBLIC_SOURCES = listOf(

@@ -30,4 +30,5 @@ include(
     ":core-input",
     ":core-video",
     ":core-battery",
+    ":core-physics",
 )

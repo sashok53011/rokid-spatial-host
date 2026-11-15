@@ -9,7 +9,7 @@ bridges so the same app drives multiple headsets.
 
 | Feature | State |
 |---|---|
-| Gradle multi-module project (7 modules) | ✅ builds (`assembleDebug` / `assembleRelease`) |
+| Gradle multi-module project (8 modules) | ✅ builds (`assembleDebug` / `assembleRelease`) |
 | Filament render loop, frame pacing, pose-driven camera | ✅ |
 | 360° backdrop sphere + spatial panels (runtime-compiled materials) | ✅ |
 | 3DoF ray select / focus / recenter, touch + keys | ✅ |
@@ -22,6 +22,7 @@ bridges so the same app drives multiple headsets.
 | **D2a: baseColor textures (hardware sRGB) + PBR factors** | ✅ DamagedHelmet textured |
 | **D2b: metallic-roughness + normal maps (glTF TANGENTS)** | ✅ verified on device |
 | **D2c: IBL — procedural equirect → GPU-prefiltered reflections + SH** | ✅ metals reflect the env |
+| **D3a: Jolt physics — gravity, floor, dynamic model body (P toggle)** | ✅ exact landing verified |
 | Release build (debug-key signed, arm64-only ~26 MB) | ✅ |
 
 ## Build & run
@@ -47,6 +48,7 @@ Requirements: JDK 17+, Android SDK (platform 35), Gradle wrapper 8.14.3
 | Middle click / `V` | Video sphere on/off (360° backdrop ↔ live stream) |
 | Wheel | Next video source — **scales the selected model** (×0.2…×6) |
 | `M` | Next model source (bundled demo → local files → …) |
+| `P` | Physics on/off — the model drops onto the floor as a rigid body |
 | Arrow keys / swipe | Cycle focused panel (`H` toggles HUD) |
 
 ### 3D models (Phase D1)
@@ -83,6 +85,7 @@ core-scene              SpatialPanel, LayoutEngine, ray hit-test (pure Kotlin)
 core-input              GestureRecognizer, RayCursor, NavigationState
 core-video              StreamPlayer (ExoPlayer, tight buffers for low latency)
 core-battery            ThermalGovernor (FPS/resolution budget), PowerReport (mAh)
+core-physics            PhysicsWorld (Jolt via jolt-jni): bodies, gravity, stepping
 ```
 
 ### Bridge chain
@@ -139,7 +142,11 @@ stay isolated in `RokidMaxBridge.UXR_ENTRY_CANDIDATES`.
     - **D2c ✅**: IBL — procedural equirect environment → GPU-prefiltered
       reflections (IBLPrefilterContext) + 3-band SH irradiance, key light
       aligned with the environment sun.
-  - **D3**: physics (Jolt) — scenes, gravity, collisions.
+  - **D3** (physics, Jolt via jolt-jni) — in progress:
+    - **D3a ✅**: physics world, gravity, static floor, dynamic model box,
+      transform sync back to the renderer (`P` toggle).
+    - **D3b**: grab-and-throw interaction + on-scene toggle button
+      (mouse-only affordance).
   - **D4**: OBJ/glTF export (round-trip).
 - **Phase C** (WebView browsing) deferred behind Phase D.
 - **Phase E**: cloud scene sync, multi-user collaboration, AIDL plugin API,
