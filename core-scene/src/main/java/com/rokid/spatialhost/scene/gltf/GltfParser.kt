@@ -7,12 +7,14 @@ import java.nio.ByteOrder
 /**
  * One renderable chunk of geometry (triangle list, indexed).
  * Coordinates in model space; [uvs] optional (equirect/2D UV0).
+ * [material] is an index into [GltfModel.materials] (null = default).
  */
 data class GltfPrimitive(
     val positions: FloatArray, // xyz triplets
     val normals: FloatArray?,  // xyz triplets or null
     val uvs: FloatArray?,      // uv pairs or null
     val indices: IntArray,
+    val material: Int? = null,
 ) {
     /** Local-space AABB of this primitive. */
     val boundsMin: FloatArray
@@ -42,6 +44,31 @@ data class GltfNode(
 )
 
 /**
+ * glTF texture: encoded image bytes (PNG/JPEG, decoded by the renderer)
+ * plus sampler wrap modes (gl codes: 10497 REPEAT, 33071 CLAMP_TO_EDGE,
+ * 33648 MIRRORED_REPEAT).
+ */
+data class GltfTexture(
+    val image: ByteArray,
+    val wrapS: Int = 10497,
+    val wrapT: Int = 10497,
+)
+
+/**
+ * glTF PBR metallic-roughness material (the subset the renderer consumes).
+ * Texture indices point into [GltfModel.textures].
+ */
+data class GltfMaterial(
+    val name: String,
+    val baseColorFactor: FloatArray,      // rgba, default 1,1,1,1
+    val baseColorTexture: Int?,            // → textures[i] or null
+    val metallicFactor: Float,             // default 1
+    val roughnessFactor: Float,            // default 1
+    val metallicRoughnessTexture: Int?,
+    val normalTexture: Int?,
+)
+
+/**
  * Parsed glTF2.0 model (MVP scope: static geometry).
  *
  * Supported: GLB containers, embedded `data:` buffers and external buffers
@@ -62,6 +89,10 @@ data class GltfModel(
     val boundsMin: FloatArray,
     val boundsMax: FloatArray,
     val name: String,
+    /** PBR materials (index referenced by primitives). */
+    val materials: List<GltfMaterial> = emptyList(),
+    /** Textures referenced by materials (decoded at load time). */
+    val textures: List<GltfTexture> = emptyList(),
 ) {
     /** Total primitive count (progress/logging). */
     val primitiveCount: Int get() = primitives.values.sumOf { it.size }
@@ -113,9 +144,86 @@ object GltfParser {
                     buffer = v.getInt("buffer"),
                     byteOffset = v.optInt("byteOffset", 0),
                     byteStride = v.optInt("byteStride", 0),
+                    byteLength = v.getInt("byteLength"),
                 )
             }
         } ?: emptyArray()
+
+        // --- images: bytes either from a data/external uri or a bufferView ---
+        fun readUri(uri: String): ByteArray = when {
+            uri.startsWith("data:") -> {
+                val idx = uri.indexOf("base64,")
+                require(idx > 0) { "non-base64 data uri unsupported" }
+                android.util.Base64.decode(uri.substring(idx + 7), android.util.Base64.DEFAULT)
+            }
+
+            else -> basePathResolver?.invoke(uri)
+                ?: throw IllegalArgumentException("external image not resolvable: $uri")
+        }
+
+        fun sliceView(viewIdx: Int): ByteArray {
+            val view = bufferViews[viewIdx]
+            val buf = buffers[view.buffer]
+                ?: throw IllegalArgumentException("buffer ${view.buffer} missing")
+            return buf.copyOfRange(view.byteOffset, view.byteOffset + view.byteLength)
+        }
+
+        val imagesJson = root.optJSONArray("images")
+        val images = Array(imagesJson?.length() ?: 0) { i ->
+            val img = imagesJson!!.getJSONObject(i)
+            when {
+                img.has("uri") -> readUri(img.getString("uri"))
+                img.has("bufferView") -> sliceView(img.getInt("bufferView"))
+                else -> throw IllegalArgumentException("image[$i] has neither uri nor bufferView")
+            }
+        }
+
+        // --- samplers (wrap modes) + textures (image + sampler) ---
+        val samplersJson = root.optJSONArray("samplers")
+        fun samplerWrap(samplerIdx: Int, key: String): Int {
+            if (samplerIdx < 0 || samplersJson == null || samplerIdx >= samplersJson.length()) return 10497
+            return samplersJson.getJSONObject(samplerIdx).optInt(key, 10497)
+        }
+
+        val texturesJson = root.optJSONArray("textures")
+        val textures = List(texturesJson?.length() ?: 0) { i ->
+            val t = texturesJson!!.getJSONObject(i)
+            val src = t.getInt("source")
+            val sampler = t.optInt("sampler", -1)
+            GltfTexture(
+                image = images.getOrElse(src) {
+                    throw IllegalArgumentException("texture[$i] source $src out of range")
+                },
+                wrapS = samplerWrap(sampler, "wrapS"),
+                wrapT = samplerWrap(sampler, "wrapT"),
+            )
+        }
+
+        // --- materials (PBR metallic-roughness subset) ---
+        val materialsJson = root.optJSONArray("materials")
+        val materials = List(materialsJson?.length() ?: 0) { i ->
+            val m = materialsJson!!.getJSONObject(i)
+            val pbr = m.optJSONObject("pbrMetallicRoughness")
+            val baseColor = pbr?.optJSONArray("baseColorFactor")
+            GltfMaterial(
+                name = m.optString("name", "material$i"),
+                baseColorFactor = FloatArray(4) {
+                    when {
+                        baseColor != null && it < baseColor.length() ->
+                            baseColor.getDouble(it).toFloat()
+
+                        it == 3 -> 1f
+                        else -> 1f
+                    }
+                },
+                baseColorTexture = pbr?.optJSONObject("baseColorTexture")?.optInt("index"),
+                metallicFactor = pbr?.optDouble("metallicFactor", 1.0)?.toFloat() ?: 1f,
+                roughnessFactor = pbr?.optDouble("roughnessFactor", 1.0)?.toFloat() ?: 1f,
+                metallicRoughnessTexture =
+                    pbr?.optJSONObject("metallicRoughnessTexture")?.optInt("index"),
+                normalTexture = m.optJSONObject("normalTexture")?.optInt("index"),
+            )
+        }
 
         val accessors = root.optJSONArray("accessors")?.let { arr ->
             Array(arr.length()) { i ->
@@ -150,7 +258,8 @@ object GltfParser {
                         readIndices(accessors[prim.getInt("indices")], buffers, bufferViews)
                     else IntArray(pos.size / 3) { it }
                     if (pos.isEmpty() || idx.isEmpty()) continue
-                    out.add(GltfPrimitive(pos, nrm, uv, idx))
+                    val matIdx = if (prim.has("material")) prim.getInt("material") else null
+                    out.add(GltfPrimitive(pos, nrm, uv, idx, matIdx))
                 }
                 if (out.isNotEmpty()) primitives[m] = out
             }
@@ -220,14 +329,28 @@ object GltfParser {
 
         val name = root.optJSONObject("asset")?.optString("generator")?.takeIf { it.isNotBlank() }
             ?: defaultName
-        return GltfModel(primitives, nodes.toList(), roots, min, max, name)
+        return GltfModel(
+            primitives = primitives,
+            nodes = nodes.toList(),
+            sceneRootNodes = roots,
+            boundsMin = min,
+            boundsMax = max,
+            name = name,
+            materials = materials,
+            textures = textures,
+        )
     }
 
     // ------------------------------------------------------------------
     // container / accessor helpers
     // ------------------------------------------------------------------
 
-    private class BufferView(val buffer: Int, val byteOffset: Int, val byteStride: Int)
+    private class BufferView(
+        val buffer: Int,
+        val byteOffset: Int,
+        val byteStride: Int,
+        val byteLength: Int,
+    )
     private class Accessor(
         val bufferView: Int,
         val byteOffset: Int,

@@ -19,6 +19,7 @@ bridges so the same app drives multiple headsets.
 | Viture IMU protocol (Gen2 `0x0301`/`0x7308`, Gen1 Euler@18) | ✅ implemented, needs real-glasses verification |
 | **D1a: glTF import (own GLB/glTF2 parser → Filament, lit material)** | ✅ DamagedHelmet demo renders |
 | **D1b: model pick / rotate / scale / local-file switch** | ✅ tap=pick, drag=rotate, wheel=scale, M=source |
+| **D2a: baseColor textures (hardware sRGB) + PBR factors** | ✅ DamagedHelmet textured |
 | Release build (debug-key signed, arm64-only ~26 MB) | ✅ |
 
 ## Build & run
@@ -50,11 +51,12 @@ Requirements: JDK 17+, Android SDK (platform 35), Gradle wrapper 8.14.3
 
 The app ships a bundled `DamagedHelmet.glb` (parsed by the in-repo glTF 2.0
 parser — GLB/gltf, embedded & external buffers, node matrix|TRS hierarchy,
-POSITION/NORMAL/UV0, u16/u32 indices) and auto-fits it to ~1.1 m in front of
-you. Click it to select (HUD shows `SELECTED`), then drag to rotate and use
-the wheel to scale; click empty space to deselect. `M` cycles the bundled
-demo with local `.glb`/`.gltf` files auto-scanned from `/sdcard/Download`,
-`/sdcard/models`, `/sdcard/Documents`, `/sdcard/Movies` — push models with
+POSITION/NORMAL/UV0, u16/u32 indices, PBR materials + baseColor textures)
+and auto-fits it to ~1.1 m in front of you. Click it to select (HUD shows
+`SELECTED`), then drag to rotate and use the wheel to scale; click empty
+space to deselect. `M` cycles the bundled demo with local `.glb`/`.gltf`
+files auto-scanned from `/sdcard/Download`, `/sdcard/models`,
+`/sdcard/Documents`, `/sdcard/Movies` — push models with
 `adb push model.glb /sdcard/Download/` and press `M`.
 
 ### Video sources
@@ -126,7 +128,12 @@ stay isolated in `RokidMaxBridge.UXR_ENTRY_CANDIDATES`.
     quaternion tangent frames, lit material + key light, auto-fit placement).
   - **D1b ✅**: model manipulation (ray/AABB pick, drag-rotate, wheel-scale,
     local-file scan + `M` switching).
-  - **D2**: textures/PBR maps + IBL for imported models.
+  - **D2** (materials/lighting) — in progress:
+    - **D2a ✅**: baseColor textures (PNG/JPEG decode → hardware-sRGB RGBA8),
+      per-primitive material instances, baseColorFactor/metallic/roughness
+      uniforms, UV0 vertex stream.
+    - **D2b**: metallic-roughness + normal maps (glTF TANGENT frames).
+    - **D2c**: IBL (prefiltered environment) for correct metal response.
   - **D3**: physics (Jolt) — scenes, gravity, collisions.
   - **D4**: OBJ/glTF export (round-trip).
 - **Phase C** (WebView browsing) deferred behind Phase D.

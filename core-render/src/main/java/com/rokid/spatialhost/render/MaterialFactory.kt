@@ -88,15 +88,19 @@ object MaterialFactory {
     }
 
     /**
-     * Lit (PBR) material with a per-instance `color` — for glTF models.
-     * Needs a directional light + camera exposure in the scene (D2 adds IBL
-     * for the full photoreal look).
+     * Lit (PBR) material for imported glTF models: per-instance `color`
+     * tint (baseColorFactor) × `baseColor` texture, metallic/roughness
+     * factors in the `mr` float2 (texture maps arrive with D2b).
+     *
+     * Needs a directional light + camera exposure in the scene (D2c adds
+     * IBL for the full photoreal look). All lit renderables must supply
+     * POSITION + TANGENTS (quaternion frame) + UV0 vertex attributes.
      */
     fun buildLit(engine: Engine): Material? {
         ensureInitialized()
         val pkg = try {
             MaterialBuilder()
-                .name("lit_color")
+                .name("lit_pbr")
                 .materialDomain(MaterialBuilder.MaterialDomain.SURFACE)
                 .shading(MaterialBuilder.Shading.LIT)
                 .blending(MaterialBuilder.BlendingMode.OPAQUE)
@@ -105,13 +109,22 @@ object MaterialFactory {
                 // Filament encodes normals as a quaternion TANGENTS frame
                 // ("TANGENTS ... is how normals are specified").
                 .require(MaterialBuilder.VertexAttribute.TANGENTS)
+                .require(MaterialBuilder.VertexAttribute.UV0)
                 .uniformParameter(MaterialBuilder.UniformType.FLOAT4, "color")
+                .uniformParameter(MaterialBuilder.UniformType.FLOAT2, "mr")
+                .samplerParameter(
+                    MaterialBuilder.SamplerType.SAMPLER_2D,
+                    MaterialBuilder.SamplerFormat.FLOAT,
+                    MaterialBuilder.ParameterPrecision.DEFAULT,
+                    "baseColor",
+                )
                 .material(
                     "void material(inout MaterialInputs material) {" +
                         "  prepareMaterial(material);" +
-                        "  material.baseColor = materialParams.color;" +
-                        "  material.roughness = 0.55;" +
-                        "  material.metallic = 0.05;" +
+                        "  material.baseColor = materialParams.color *" +
+                        "      texture(materialParams_baseColor, getUV0());" +
+                        "  material.roughness = materialParams.mr.y;" +
+                        "  material.metallic = materialParams.mr.x;" +
                         "}",
                 )
                 .platform(MaterialBuilder.Platform.MOBILE)
@@ -119,20 +132,20 @@ object MaterialFactory {
                 .optimization(MaterialBuilder.Optimization.PERFORMANCE)
                 .build()
         } catch (t: Throwable) {
-            Log.e(TAG, "lit_color build threw", t)
+            Log.e(TAG, "lit_pbr build threw", t)
             return null
         }
         if (!pkg.isValid) {
-            Log.e(TAG, "lit_color package invalid")
+            Log.e(TAG, "lit_pbr package invalid")
             return null
         }
         return try {
             val buf = pkg.buffer
             val material = Material.Builder().payload(buf, buf.remaining()).build(engine)
-            Log.i(TAG, "lit_color compiled (${buf.remaining()} bytes)")
+            Log.i(TAG, "lit_pbr compiled (${buf.remaining()} bytes)")
             material
         } catch (t: Throwable) {
-            Log.e(TAG, "lit_color Material.Builder failed", t)
+            Log.e(TAG, "lit_pbr Material.Builder failed", t)
             null
         }
     }
