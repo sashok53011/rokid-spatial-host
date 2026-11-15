@@ -456,6 +456,7 @@ class MainActivity : Activity() {
                 )
             },
         )
+        pushAllPanelUi() // cards instead of the white fallback texture
         recognizer = GestureRecognizer()
         thermal = ThermalGovernor(this)
         power = PowerReport(this)
@@ -1057,21 +1058,29 @@ class MainActivity : Activity() {
         return "%d:%02d".format(s / 60, s % 60)
     }
 
-    /** Render the deck's current state and hand the pixels to the renderer. */
-    private fun pushVideoPanelUi() {
-        val panel = layoutEngine.panels[VIDEO_PANEL_ID] ?: return
+    /** Render a panel's current state and hand the pixels to the renderer. */
+    private fun pushPanelUi(panelId: String) {
+        val panel = layoutEngine.panels[panelId] ?: return
         val w = com.rokid.spatialhost.render.PanelUiDrawer.WIDTH
         val h = com.rokid.spatialhost.render.PanelUiDrawer.HEIGHT
         val bmp = videoUiBitmap ?: android.graphics.Bitmap
             .createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
             .also { videoUiBitmap = it }
-        com.rokid.spatialhost.render.PanelUiDrawer.draw(
-            panel.copy(widgets = videoPanelWidgets()), bmp,
-        )
+        // The deck rebuilds its widgets from live state; other panels are
+        // static cards (title only).
+        val widgets = if (panelId == VIDEO_PANEL_ID) videoPanelWidgets() else panel.widgets
+        com.rokid.spatialhost.render.PanelUiDrawer.draw(panel.copy(widgets = widgets), bmp)
         val px = videoUiPixels ?: ByteArray(w * h * 4).also { videoUiPixels = it }
         bmp.copyPixelsToBuffer(java.nio.ByteBuffer.wrap(px))
-        renderer.updatePanelUi(VIDEO_PANEL_ID, w, h, px)
+        renderer.updatePanelUi(panelId, w, h, px)
     }
+
+    /** All panels get a card (arc panels: title-only) — no white slabs. */
+    private fun pushAllPanelUi() {
+        layoutEngine.panels.keys.forEach { pushPanelUi(it) }
+    }
+
+    private fun pushVideoPanelUi() = pushPanelUi(VIDEO_PANEL_ID)
 
     /** Dispatch a widget click under the crosshair ([u] localizes sliders). */
     private fun handleWidget(w: com.rokid.spatialhost.scene.Widget, u: Float) {

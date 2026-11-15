@@ -40,6 +40,7 @@ path can be reproduced.
 | **D3b: grab-and-throw — spring drag, mouse-flick throws** | ✅ 3.16 m throw verified |
 | **D4: OBJ + glTF export (E) with verified round-trip** | ✅ Phase D complete |
 | **Panel widgets + video deck: PLAY/SRC/LOOP/SEEK via gaze-click** | ✅ |
+| **IBL skybox background + lit shadow floor + dynamic shadows** | ✅ |
 | Release build (debug-key signed, arm64-only ~26 MB) | ✅ |
 
 ## Requirements
@@ -312,6 +313,23 @@ right after `input swipe` did nothing).
   logged as `3 hidden, 1 persistent` (the arc panels disappear, the deck
   stays for control).
 
+### Skybox & shadows
+
+* The skybox reuses `IblBuilder.reflections` (mip0 = sharp env):
+  `Skybox.Builder().environment(...)`. In skybox mode the flat color
+  sphere is NOT created (`sphereEntity = -1`) and every sphere code path
+  guards `>= 0`. Video still works — the video sphere builds on demand
+  and hides floor + arc panels (the persistent deck stays).
+* Shadows need a **LIT receiver**: unlit panels ignore lights entirely,
+  so a lit floor slab (`lit_pbr`, matte, y = −1 = physics floor) was
+  added — without it the model would cast onto nothing. Verified with a
+  temporary straight-down sun: the helmet's silhouette lands on the floor
+  (with the angled sun aligned to the IBL env, the shadow sits behind the
+  deck and only shows from the sides).
+* Aliasing trap: several `updatePanelUi` calls sharing ONE pixel buffer
+  made every panel display the last-drawn image — the channel now clones
+  pixels.
+
 ## Debugging tips
 
 * **Screenshots**: PowerShell `>` corrupts binary output — use
@@ -343,10 +361,12 @@ right after `input swipe` did nothing).
 
 - [ ] **Emissive + AO maps** from glTF (parser already keeps texture
       indices; one more sampler in `lit_pbr`)
-- [ ] **Visible skybox** from the IBL environment (the prefiltered
-      cubemap already exists — add `Skybox.Builder().environment()`)
-- [ ] **Shadows**: enable `castShadows` on the key light + shadow
-      quality settings (Filament supports it out of the box)
+- [x] **Visible skybox** from the IBL environment — done: skybox from the
+      prefiltered reflections (mip0); in skybox mode the flat color
+      sphere is skipped (kept as fallback if IBL fails)
+- [x] **Shadows** — done: key light casts, the model casts/receives, a
+      new lit floor slab (y = -1, matching the physics floor) receives;
+      arc panels excluded (unlit cards must not cast)
 - [ ] **Tonemapping/HDR**: post-processing is currently disabled for
       perf — re-enable ACES with the bloom pass for emissive/neon looks
 - [ ] **STL + OBJ import** (export exists; import would close the loop

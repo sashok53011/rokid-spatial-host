@@ -129,6 +129,10 @@ class ModelManager(
                     // either winding, and a wrongly culled model looks like a
                     // loading bug (single-model scenes don't need the perf).
                     .culling(false)
+                    // Shadows: the model casts onto the lit floor and
+                    // self-shadows (explicit — defaults must not drift).
+                    .castShadows(true)
+                    .receiveShadows(true)
                     .build(engine, entity)
                 // GlTF node hierarchy: primitive under its node entity, which
                 // carries the node's local transform (e.g. the helmet's +90°

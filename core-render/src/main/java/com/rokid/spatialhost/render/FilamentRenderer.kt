@@ -21,6 +21,7 @@ import com.google.android.filament.MaterialInstance
 import com.google.android.filament.RenderableManager
 import com.google.android.filament.Renderer
 import com.google.android.filament.Scene
+import com.google.android.filament.Skybox
 import com.google.android.filament.Stream
 import com.google.android.filament.SwapChain
 import com.google.android.filament.Texture
@@ -98,7 +99,10 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
 
     /** App thread: replace the widget texture of panel [id]. */
     fun updatePanelUi(id: String, width: Int, height: Int, pixels: ByteArray) {
-        pendingPanelUi = (pendingPanelUi ?: emptyList()) + PanelUiUpdate(id, width, height, pixels)
+        // Clone: callers reuse their buffer across panels, and queued
+        // updates must not alias into one array (all would show the last).
+        pendingPanelUi = (pendingPanelUi ?: emptyList()) +
+            PanelUiUpdate(id, width, height, pixels.copyOf())
     }
 
     fun setFocusedPanel(id: String?) {
@@ -219,9 +223,17 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
         val panelTextures: MutableMap<String, Texture> = mutableMapOf(),
         val panelTexSizes: MutableMap<String, Pair<Int, Int>> = mutableMapOf(),
         var whiteTexture: Texture? = null,
+        var flatNormalTexture: Texture? = null,
         /** Ids kept visible while the video sphere hides the rest. */
         val panelPersistent: MutableSet<String> = mutableSetOf(),
         val panelHidden: MutableSet<String> = mutableSetOf(),
+        /** IBL skybox replaces the flat color sphere as the background. */
+        val hasSkybox: Boolean = false,
+        var skybox: Skybox? = null,
+        /** Lit floor slab (y = -1, matches the physics floor) — shadow receiver. */
+        var floorEntity: Int = -1,
+        var floorInstance: MaterialInstance? = null,
+        var floorHidden: Boolean = false,
         // video sphere resources (created lazily by requestVideoSphere)
         var videoMaterial: Material? = null,
         var videoTexture: Texture? = null,
@@ -288,31 +300,43 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
             // Key light for lit models — direction aligned with the sun of
             // the procedural IBL environment (D2c), so direct and ambient
             // light agree. Travels -Z: lights the camera-facing side.
+            // castShadows: the model self-shadows and drops onto the floor.
             val lightEntity = EntityManager.get().create()
             LightManager.Builder(LightManager.Type.DIRECTIONAL)
                 .color(1.0f, 0.98f, 0.94f)
                 .intensity(110_000f) // clear-day lux, as in Filament's samples
+                // Aligned with the IBL env sun (reflections and direct light
+                // agree); the helmet's floor shadow falls back-left of it.
                 .direction(-0.42f, -0.66f, -0.62f)
-                .castShadows(false)
+                .castShadows(true)
                 .build(e, lightEntity)
             s.addEntity(lightEntity)
 
             // D2c: image-based lighting — procedural equirect → GPU-prefiltered
             // reflections + 3-band SH irradiance (see IblBuilder).
             val ibl = IblBuilder(e)
+            var skybox: Skybox? = null
             if (ibl.build()) {
                 s.indirectLight = ibl.indirectLight
+                // Same environment as the VISIBLE background (mip0 of the
+                // prefiltered reflections = the sharp environment).
+                ibl.reflections?.let { refl ->
+                    skybox = Skybox.Builder().environment(refl).build(e)
+                    s.skybox = skybox
+                    Log.i(TAG, "skybox: IBL environment visible as background")
+                }
             }
 
-            val sphereInstance = colorMaterial?.createInstance()
-            sphereInstance?.setParameter(
-                "color",
-                SPHERE_COLOR[0], SPHERE_COLOR[1], SPHERE_COLOR[2], SPHERE_COLOR[3],
-            )
-            val sphereEntity = if (sphereInstance != null) {
-                buildSphereEntity(e, s, sphereMesh, sphereInstance)
-            } else {
-                EntityManager.get().create()
+            // Background: IBL skybox if available, else the flat tint sphere.
+            val sphereInstance = if (skybox == null) {
+                colorMaterial?.createInstance()?.also {
+                    it.setParameter("color", SPHERE_COLOR[0], SPHERE_COLOR[1], SPHERE_COLOR[2], SPHERE_COLOR[3])
+                }
+            } else null
+            val sphereEntity = when {
+                sphereInstance != null -> buildSphereEntity(e, s, sphereMesh, sphereInstance)
+                skybox != null -> -1 // background comes from the skybox
+                else -> EntityManager.get().create()
             }
 
             sceneState = SceneState(
@@ -328,7 +352,12 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
                 modelManager = ModelManager(e, s, litMaterial),
                 ibl = ibl,
                 panelUiMaterial = panelUiMaterial,
+                hasSkybox = skybox != null,
+                skybox = skybox,
             )
+            sceneState?.let { st ->
+                if (litMaterial != null && skybox != null) buildShadowFloor(st)
+            }
             Log.i(
                 TAG,
                 "scene after sphere: entities=${s.entityCount} renderables=${s.renderableCount} " +
@@ -507,6 +536,9 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
                     Box(0f, 0f, 0f, spec.widthM / 2f, spec.heightM / 2f, 0.05f),
                 )
                 .culling(false)
+                // UI cards don't cast (thin planes would smear shadows);
+                // they're unlit anyway, so receiving is moot.
+                .castShadows(false)
                 .build(e, entity)
             st.scene.addEntity(entity)
 
@@ -577,6 +609,70 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
         )
         st.whiteTexture = tex
         return tex
+    }
+
+    /** Flat tangent-space normal (128,128,255) — normalMap fallback. */
+    private fun ensureFlatNormalTexture(st: SceneState): Texture {
+        st.flatNormalTexture?.let { return it }
+        val bmp = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
+        bmp.setPixel(0, 0, Color.rgb(128, 128, 255))
+        val buf = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder())
+        bmp.copyPixelsToBuffer(buf)
+        buf.rewind()
+        bmp.recycle()
+        val tex = Texture.Builder()
+            .width(1)
+            .height(1)
+            .format(Texture.InternalFormat.RGBA8)
+            .sampler(Texture.Sampler.SAMPLER_2D)
+            .levels(1)
+            .build(st.engine)
+        tex.setImage(
+            st.engine, 0,
+            Texture.PixelBufferDescriptor(buf, Texture.Format.RGBA, Texture.Type.UBYTE),
+        )
+        st.flatNormalTexture = tex
+        return tex
+    }
+
+    /**
+     * Visible floor slab at the physics floor top (y = -1): LIT so it
+     * receives the key light's shadow — without a lit receiver the model
+     * would cast onto nothing (the skybox/panels are unlit).
+     */
+    private fun buildShadowFloor(st: SceneState) {
+        val lit = st.litMaterial ?: return
+        val white = ensureWhiteTexture(st)
+        val flat = ensureFlatNormalTexture(st)
+        val instance = lit.createInstance()
+        instance.setParameter("color", FLOOR_COLOR[0], FLOOR_COLOR[1], FLOOR_COLOR[2], FLOOR_COLOR[3])
+        instance.setParameter("mr", 0f, 0.9f) // matte dielectric
+        instance.setParameter("baseColor", white, PANEL_SAMPLER)
+        instance.setParameter("mrMap", white, PANEL_SAMPLER)
+        instance.setParameter("normalMap", flat, PANEL_SAMPLER)
+
+        val entity = EntityManager.get().create()
+        RenderableManager.Builder(1)
+            .geometry(
+                0,
+                RenderableManager.PrimitiveType.TRIANGLES,
+                st.quadMesh.vertexBuffer,
+                st.quadMesh.indexBuffer,
+                0,
+                st.quadMesh.indexCount,
+            )
+            .material(0, instance)
+            .boundingBox(Box(0f, 0f, 0f, 40f, 0.1f, 40f))
+            .castShadows(false)
+            .receiveShadows(true)
+            .culling(false)
+            .build(st.engine, entity)
+        st.scene.addEntity(entity)
+        val tm = st.engine.transformManager
+        tm.setTransform(tm.create(entity), FLOOR_MATRIX)
+        st.floorEntity = entity
+        st.floorInstance = instance
+        Log.i(TAG, "shadow floor added at y=-1 (receiver)")
     }
 
     private fun applyFocus() {
@@ -658,8 +754,10 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
         )
 
         // Swap the sphere renderable over to the video instance.
-        st.scene.removeEntity(st.sphereEntity)
-        e.destroyEntity(st.sphereEntity)
+        if (st.sphereEntity >= 0) {
+            st.scene.removeEntity(st.sphereEntity)
+            e.destroyEntity(st.sphereEntity)
+        }
         st.sphereInstance?.let { e.destroyMaterialInstance(it) }
         st.sphereEntity = buildSphereEntity(e, st.scene, st.sphereMesh, instance)
         st.sphereInstance = instance
@@ -681,6 +779,10 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
             st.scene.removeEntity(entity)
             st.panelHidden += id
         }
+        if (st.floorEntity >= 0) {
+            st.scene.removeEntity(st.floorEntity)
+            st.floorHidden = true
+        }
         Log.i(
             TAG,
             "panels hidden while video plays " +
@@ -699,17 +801,27 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
         val e = st.engine
         val hadVideo = st.videoSurfaceTexture != null
 
-        st.colorMaterial?.let { colorMat ->
+        // Drop the video sphere (it may be the only sphere in skybox mode).
+        if (st.sphereEntity >= 0) {
             st.scene.removeEntity(st.sphereEntity)
             e.destroyEntity(st.sphereEntity)
-            st.sphereInstance?.let { e.destroyMaterialInstance(it) }
-            val instance = colorMat.createInstance()
-            instance.setParameter(
-                "color",
-                SPHERE_COLOR[0], SPHERE_COLOR[1], SPHERE_COLOR[2], SPHERE_COLOR[3],
-            )
-            st.sphereEntity = buildSphereEntity(e, st.scene, st.sphereMesh, instance)
-            st.sphereInstance = instance
+            st.sphereEntity = -1
+        }
+        st.sphereInstance?.let { e.destroyMaterialInstance(it) }
+        st.sphereInstance = null
+
+        // Restore the flat tint sphere ONLY when the skybox is absent —
+        // with an IBL skybox the environment IS the background.
+        if (!st.hasSkybox) {
+            st.colorMaterial?.let { colorMat ->
+                val instance = colorMat.createInstance()
+                instance.setParameter(
+                    "color",
+                    SPHERE_COLOR[0], SPHERE_COLOR[1], SPHERE_COLOR[2], SPHERE_COLOR[3],
+                )
+                st.sphereEntity = buildSphereEntity(e, st.scene, st.sphereMesh, instance)
+                st.sphereInstance = instance
+            }
         }
 
         st.videoSurface?.release()
@@ -729,6 +841,10 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
             st.panelEntities[id]?.let { st.scene.addEntity(it) }
         }
         st.panelHidden.clear()
+        if (st.floorHidden && st.floorEntity >= 0) {
+            st.scene.addEntity(st.floorEntity)
+            st.floorHidden = false
+        }
         Log.i(TAG, "video sphere detached (wasStreaming=$hadVideo), panels restored")
     }
 
@@ -744,9 +860,18 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
         for (tex in st.panelTextures.values) e.destroyTexture(tex)
         st.panelTextures.clear()
         st.whiteTexture?.let { e.destroyTexture(it) }
+        st.flatNormalTexture?.let { e.destroyTexture(it) }
         st.panelUiMaterial?.let { e.destroyMaterial(it) }
-        st.scene.removeEntity(st.sphereEntity)
-        e.destroyEntity(st.sphereEntity)
+        if (st.floorEntity >= 0) {
+            st.scene.removeEntity(st.floorEntity)
+            e.destroyEntity(st.floorEntity)
+        }
+        st.floorInstance?.let { e.destroyMaterialInstance(it) }
+        st.skybox?.let { e.destroySkybox(it) }
+        if (st.sphereEntity >= 0) {
+            st.scene.removeEntity(st.sphereEntity)
+            e.destroyEntity(st.sphereEntity)
+        }
         st.sphereInstance?.let { e.destroyMaterialInstance(it) }
         // video sphere resources (sphereInstance already destroyed above)
         st.videoSurface?.release()
@@ -841,6 +966,14 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
             0f, 0f, 0f, 1f,
         )
         private val SPHERE_COLOR = floatArrayOf(0.12f, 0.17f, 0.28f, 1f)
+        /** T(0,-1,-2.2) · Rx(-90°) · S(80): flat slab, normal +Y, ±40 m. */
+        private val FLOOR_MATRIX = floatArrayOf(
+            80f, 0f, 0f, 0f,
+            0f, 0f, -80f, 0f,
+            0f, 1f, 0f, 0f,
+            0f, -1f, -2.2f, 1f,
+        )
+        private val FLOOR_COLOR = floatArrayOf(0.30f, 0.33f, 0.38f, 1f)
         private val PANEL_TINT = floatArrayOf(0.12f, 0.30f, 0.40f, 1f)
         private val FOCUS_TINT = floatArrayOf(0.30f, 0.72f, 0.85f, 1f)
         /** Widget panels: neutral pass-through; focus = uniform brighten. */

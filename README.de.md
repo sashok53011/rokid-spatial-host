@@ -41,6 +41,7 @@ der Pfad ist also reproduzierbar.
 | **D3b: Greifen-und-Werfen — Feder-Drag, Maus-Flick wirft** | ✅3,16 m Wurf verifiziert |
 | **D4: OBJ- + glTF-Export (E) mit verifiziertem Round-Trip** | ✅ Phase D abgeschlossen |
 | **Panel-Widgets + Video-Deck: PLAY/SRC/LOOP/SEEK per Blick-Klick** | ✅ |
+| **IBL-Skybox-Hintergrund + beleuchteter Schattenboden + dynamische Schatten** | ✅ |
 | Release-Build (mit Debug-Key signiert, arm64-only ~26 MB) | ✅ |
 
 ## Voraussetzungen
@@ -328,6 +329,24 @@ nächsten echten Klick** (Symptom: zweimal klicken; in adb-Skripten tat
   Immersive-Video — geloggt als `3 hidden, 1 persistent` (die
   Arc-Panel-Platten verschwinden, das Deck bleibt zur Steuerung).
 
+### Skybox & Schatten
+
+* Der Skybox nutzt `IblBuilder.reflections` wieder (mip0 = scharfe
+  Umgebung): `Skybox.Builder().environment(...)`. Im Skybox-Modus wird
+  die flache Farbsphäre NICHT erzeugt (`sphereEntity = -1`), alle
+  Sphären-Pfade prüfen `>= 0`. Video läuft wie gehabt — die Videosphäre
+  wird bei Bedarf gebaut und blendet Boden + Arc-Panels aus (das
+  persistente Deck bleibt).
+* Schatten brauchen einen **LIT-Receiver**: unlit Panels ignorieren Licht
+  komplett, deshalb gibt es einen beleuchteten Boden (`lit_pbr`, matt,
+  y = −1 = Physikboden) — ohne ihn würde das Modell ins Nichts werfen.
+  Verifiziert mit einem tempierten Sonne-gerade-runter-Test: die
+  Helmsilhouette liegt am Boden; beim schrägen (IBL-ausgerichteten) Licht
+  liegt der Schatten hinter dem Deck und ist nur von der Seite sichtbar.
+* Aliasing-Falle: mehrere `updatePanelUi`-Aufrufe mit EINEM Pixelpuffer
+  ließen alle Panels das zuletzt gezeichnete Bild zeigen — der Kanal
+  klont Pixel jetzt.
+
 ## Debugging-Tipps
 
 * **Screenshots**: PowerShell `>` zerstört Binärdaten —
@@ -361,10 +380,12 @@ nächsten echten Klick** (Symptom: zweimal klicken; in adb-Skripten tat
 
 - [ ] **Emissive- + AO-Maps** aus glTF (Texturindizes hält der Parser
       schon; ein weiterer Sampler in `lit_pbr`)
-- [ ] **Sichtbarer Skybox** aus der IBL-Umgebung (die gefilterte
-      Cubemap existiert schon — `Skybox.Builder().environment()`)
-- [ ] **Schatten**: `castShadows` am Key-Light an + Qualitätssettings
-      (Filament out-of-the-box)
+- [x] **Sichtbarer Skybox** aus der IBL-Umgebung — fertig: Himmel aus den
+      gefilterten Reflections (mip0); im Skybox-Modus wird die flache
+      Farbsphäre NICHT erzeugt (bleibt Fallback bei IBL-Ausfall)
+- [x] **Schatten** — fertig: Key-Light wirft, Modell wirft/fängt, neuer
+      beleuchteter Boden (`lit_pbr`, matt, y = −1 = Physikboden) fängt;
+      Arc-Panels ausgeschlossen (unlit dürfen nicht werfen)
 - [ ] **Tonemapping/HDR**: Post-Processing ist gerade wegen Performance
       aus — ACES mit Bloom für Emit/Neon zurückholen
 - [ ] **STL- + OBJ-Import** (Export exists; Import schließt den Kreis
