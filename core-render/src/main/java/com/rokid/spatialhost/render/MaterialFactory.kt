@@ -199,7 +199,12 @@ object MaterialFactory {
                 .material(
                     "void material(inout MaterialInputs material) {" +
                         "  prepareMaterial(material);" +
-                        "  material.baseColor = texture(materialParams_baseColor, getUV0());" +
+                        // Equirect frames arrive GL-oriented (row0 = bottom)
+                        // while the panorama convention expects v=0 = top —
+                        // without this flip the video renders upside down.
+                        "  vec2 uv = getUV0();" +
+                        "  material.baseColor =" +
+                        "      texture(materialParams_baseColor, vec2(uv.x, 1.0 - uv.y));" +
                         "}",
                 )
                 .platform(MaterialBuilder.Platform.MOBILE)

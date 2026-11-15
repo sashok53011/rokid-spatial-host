@@ -188,6 +188,12 @@ around a `SurfaceTexture` fed by media3. In shader code samplers are
 referenced as the **macro** `materialParams_<name>` (dot-syntax is only
 for uniform parameters). The equirect sphere uses `culling(NONE)`.
 
+**Pitfall — upside-down video**: frames reach the shader GL-oriented
+(row0 = bottom) while the panorama convention expects v = 0 = top, so
+`getUV0()` must be flipped (`vec2(uv.x, 1.0 - uv.y)`) or the whole
+360° world renders upside down (roofs on top → water on top). This bug
+lived since Phase B2 until verified with a street-panorama screencap.
+
 ### D1 — glTF import
 
 `GltfParser` (core-scene) handles GLB containers, `data:`/external
