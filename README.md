@@ -23,6 +23,7 @@ bridges so the same app drives multiple headsets.
 | **D2b: metallic-roughness + normal maps (glTF TANGENTS)** | ✅ verified on device |
 | **D2c: IBL — procedural equirect → GPU-prefiltered reflections + SH** | ✅ metals reflect the env |
 | **D3a: Jolt physics — gravity, floor, dynamic model body (P toggle)** | ✅ exact landing verified |
+| **D3b: grab-and-throw — spring drag, mouse-flick throws** | ✅ 3.16 m throw verified |
 | Release build (debug-key signed, arm64-only ~26 MB) | ✅ |
 
 ## Build & run
@@ -42,7 +43,7 @@ Requirements: JDK 17+, Android SDK (platform 35), Gradle wrapper 8.14.3
 
 | Input | Action |
 |---|---|
-| Mouse drag | Look around (on top of head tracking) — **rotates the selected model** |
+| Mouse drag | Look around (on top of head tracking) — **rotates the selected model**; in physics mode a press on the model **grabs it** (drag = carry, flick = throw) |
 | Left click | Select model under crosshair, else panel (click empty space = deselect) |
 | Double click / Right click | Recenter session frame |
 | Middle click / `V` | Video sphere on/off (360° backdrop ↔ live stream) |

@@ -81,6 +81,8 @@ class MainActivity : Activity() {
     private var lastX = 0f
     private var lastY = 0f
     private var moved = false
+    private var totalMoveX = 0f // CUMULATIVE since DOWN — a slow drag (small
+    private var totalMoveY = 0f // per-event deltas) must not read as a tap
     private var lastTapTime = 0L
 
     // Manual look offset on top of head pose (mouse drag with glasses active).
@@ -216,6 +218,63 @@ class MainActivity : Activity() {
 
     private val physics = com.rokid.spatialhost.physics.PhysicsWorld()
     private var physicsActive = false
+    private var grabbing = false // D3b: the mouse holds the model
+    private var grabDistance = 0f // eye → grab point, world meters
+    private var grabOffX = 0f // mouse-driven target offset (world meters)
+    private var grabOffY = 0f
+
+    /**
+     * D3b: press while the crosshair is on the model during simulation →
+     * engage the grab spring at the hit point.
+     */
+    private fun tryGrabAtCrosshair(): Boolean {
+        val obj = sceneModels.firstOrNull() ?: return false
+        val f = rotateVec(currentCameraQuat(), 0f, 0f, -1f)
+        val localOrigin = obj.worldToLocal(floatArrayOf(0f, 0f, 0f))
+        val localDir = obj.worldDirToLocal(f)
+        val t = com.rokid.spatialhost.scene.hitBox(
+            localOrigin, localDir, obj.boundsMin, obj.boundsMax,
+        )
+        if (t == null) {
+            Log.i(
+                TAG,
+                "grab miss: lookPitch=${"%.3f".format(lookPitch)} " +
+                    "fwd=${f.joinToString(",") { "%.2f".format(it) }} " +
+                    "objPos=${obj.pos.joinToString(",") { "%.2f".format(it) }} " +
+                    "yaw=${"%.2f".format(obj.yawRad)} pitch=${"%.2f".format(obj.pitchRad)}",
+            )
+            return false
+        }
+        grabbing = true
+        grabDistance = t
+        grabOffX = 0f
+        grabOffY = 0f
+        // The eye sits at the world origin, so the grab point is dir × t.
+        physics.dragTo(f[0] * t, f[1] * t, f[2] * t)
+        Log.i(TAG, "grab ${obj.label} at ${"%.2f".format(t)} m")
+        return true
+    }
+
+    /**
+     * Re-aim the held model: base point along the current crosshair ray,
+     * plus a mouse-driven offset in the camera's right/up plane (this is
+     * what a flick of the mouse throws with).
+     */
+    private fun dragGrabbedModel(dx: Float, dy: Float) {
+        val q = currentCameraQuat()
+        val f = rotateVec(q, 0f, 0f, -1f)
+        val r = rotateVec(q, 1f, 0f, 0f)
+        val u = rotateVec(q, 0f, 1f, 0f)
+        // pixels → radians (radPerPx) → meters at the grab distance
+        val scale = grabDistance * 0.004f
+        grabOffX = (grabOffX + dx * scale).coerceIn(-3f, 3f)
+        grabOffY = (grabOffY - dy * scale).coerceIn(-3f, 3f)
+        physics.dragTo(
+            f[0] * grabDistance + r[0] * grabOffX + u[0] * grabOffY,
+            f[1] * grabDistance + r[1] * grabOffX + u[1] * grabOffY,
+            f[2] * grabDistance + r[2] * grabOffX + u[2] * grabOffY,
+        )
+    }
 
     private val physicsTick = object : Runnable {
         override fun run() {
@@ -244,6 +303,8 @@ class MainActivity : Activity() {
     private fun togglePhysics() {
         if (physicsActive) {
             physicsActive = false
+            grabbing = false
+            physics.releaseGrab()
             mainHandler.removeCallbacks(physicsTick)
             // Keep the model where it landed.
             val obj = sceneModels.firstOrNull()
@@ -645,6 +706,10 @@ class MainActivity : Activity() {
                     lastX = ev.x
                     lastY = ev.y
                     moved = false
+                    totalMoveX = 0f
+                    totalMoveY = 0f
+                    // Pressing on the model during simulation grabs it.
+                    if (physicsActive) tryGrabAtCrosshair()
                     true
                 }
 
@@ -665,8 +730,13 @@ class MainActivity : Activity() {
                 MotionEvent.ACTION_MOVE -> {
                     val dx = ev.x - lastX
                     val dy = ev.y - lastY
-                    if (hypot(dx, dy) > 8f) moved = true
-                    if (moved) {
+                    totalMoveX += dx
+                    totalMoveY += dy
+                    if (hypot(totalMoveX, totalMoveY) > 8f) moved = true
+                    if (moved && grabbing) {
+                        // Held model follows crosshair + mouse offset (throw).
+                        dragGrabbedModel(dx, dy)
+                    } else if (moved) {
                         val obj = if (modelSelected && !physicsActive) sceneModels.firstOrNull() else null
                         if (obj != null) {
                             // Drag rotates the selected model (grab-the-surface
@@ -695,6 +765,11 @@ class MainActivity : Activity() {
                 }
 
                 MotionEvent.ACTION_UP -> {
+                    if (grabbing) {
+                        grabbing = false
+                        physics.releaseGrab() // keeps velocity → the throw
+                        Log.i(TAG, "release — model thrown")
+                    }
                     if (!moved) {
                         val now = System.currentTimeMillis()
                         val gesture =
@@ -916,6 +991,7 @@ class MainActivity : Activity() {
                 val p = physics.modelPosition()
                 append(
                     "physics: ${if (physicsActive) "ON" else "OFF"}" +
+                        (if (grabbing) " · GRABBED" else "") +
                         (p?.let { " · y=${"%.2f".format(it[1])}" } ?: "") +
                         " · floor $FLOOR_TOP_Y m (P=toggle)\n",
                 )

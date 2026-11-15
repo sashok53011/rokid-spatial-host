@@ -14,6 +14,7 @@ import com.github.stephengold.joltjni.PhysicsSystem
 import com.github.stephengold.joltjni.Quat
 import com.github.stephengold.joltjni.RVec3
 import com.github.stephengold.joltjni.TempAllocatorMalloc
+import com.github.stephengold.joltjni.Vec3
 import com.github.stephengold.joltjni.enumerate.EActivation
 import com.github.stephengold.joltjni.enumerate.EMotionType
 
@@ -37,8 +38,15 @@ class PhysicsWorld {
     private var modelBody = -1
     private var floorBody = -1
 
+    // Grab-and-throw (D3b): while [dragTarget] is set, a critically-damped
+    // spring pulls the model body toward it every step — the same approach
+    // Jolt's own drag uses. Releasing keeps the accumulated velocity.
+    private var dragTarget: FloatArray? = null
+    private var dragMass = 1_000f // kg, kept in sync with addModelBox
+
     val isInitialized: Boolean get() = system != null
     val hasModelBody: Boolean get() = modelBody >= 0
+    val isGrabbing: Boolean get() = dragTarget != null
 
     /** Full Jolt bring-up (idempotent; follows the jolt-jni tutorial). */
     fun ensureInit(): Boolean {
@@ -128,7 +136,22 @@ class PhysicsWorld {
             shape.close()
         }
         Log.i(TAG, "model body id=$modelBody at ($px,$py,$pz) half=($hx,$hy,$hz)")
+        // Jolt's default density is 1000 kg/m3 — mirror it for the drag spring.
+        dragMass = (2f * hx) * (2f * hy) * (2f * hz) * 1_000f
         return modelBody >= 0
+    }
+
+    /**
+     * D3b: point the grab-spring at a world position (called on every mouse
+     * move while the model is held). No-op until [releaseGrab].
+     */
+    fun dragTo(x: Float, y: Float, z: Float) {
+        dragTarget = floatArrayOf(x, y, z)
+    }
+
+    /** Let go — the body keeps its velocity and flies on (the throw). */
+    fun releaseGrab() {
+        dragTarget = null
     }
 
     /** Advance the simulation by [dt] seconds (fixed step,1 collision pass). */
@@ -136,6 +159,26 @@ class PhysicsWorld {
         val ps = system ?: return
         val temp = tempAllocator ?: return
         val jobs = jobSystem ?: return
+        // Grab spring: F = m·(kp·Δx − kd·v), tuned to ~1.5 Hz with slight
+        // under-damping so flicks transfer into a real throw on release.
+        val tgt = dragTarget
+        if (tgt != null && modelBody >= 0) {
+            val bi = bodies
+            if (bi != null) {
+                val com = bi.getCenterOfMassPosition(modelBody)
+                val vel = bi.getLinearVelocity(modelBody)
+                val m = dragMass
+                var fx = m * (DRAG_KP * (tgt[0] - com.get(0).toFloat()) - DRAG_KD * vel.x)
+                var fy = m * (DRAG_KP * (tgt[1] - com.get(1).toFloat()) - DRAG_KD * vel.y)
+                var fz = m * (DRAG_KP * (tgt[2] - com.get(2).toFloat()) - DRAG_KD * vel.z)
+                // Clamp per axis (~10 g) — a target far away must not explode.
+                val lim = m * 100f
+                fx = fx.coerceIn(-lim, lim)
+                fy = fy.coerceIn(-lim, lim)
+                fz = fz.coerceIn(-lim, lim)
+                bi.addForce(modelBody, Vec3(fx, fy, fz))
+            }
+        }
         ps.update(dt, 1, temp, jobs)
     }
 
@@ -174,6 +217,10 @@ class PhysicsWorld {
         private const val MAX_BODIES = 5_000
         private const val MAX_BODY_PAIRS = 65_536
         private const val MAX_CONTACTS = 20_480
+
+        /** Grab spring: ω = 2π·1.5 Hz, ζ ≈ 0.96 (kp = ω², kd = 2ζω). */
+        private const val DRAG_KP = 88.8f
+        private const val DRAG_KD = 17.0f
 
         private var nativesLoaded = false
 
