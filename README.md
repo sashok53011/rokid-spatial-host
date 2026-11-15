@@ -21,6 +21,7 @@ bridges so the same app drives multiple headsets.
 | **D1b: model pick / rotate / scale / local-file switch** | ✅ tap=pick, drag=rotate, wheel=scale, M=source |
 | **D2a: baseColor textures (hardware sRGB) + PBR factors** | ✅ DamagedHelmet textured |
 | **D2b: metallic-roughness + normal maps (glTF TANGENTS)** | ✅ verified on device |
+| **D2c: IBL — procedural equirect → GPU-prefiltered reflections + SH** | ✅ metals reflect the env |
 | Release build (debug-key signed, arm64-only ~26 MB) | ✅ |
 
 ## Build & run
@@ -129,13 +130,15 @@ stay isolated in `RokidMaxBridge.UXR_ENTRY_CANDIDATES`.
     quaternion tangent frames, lit material + key light, auto-fit placement).
   - **D1b ✅**: model manipulation (ray/AABB pick, drag-rotate, wheel-scale,
     local-file scan + `M` switching).
-  - **D2** (materials/lighting) — in progress:
+  - **D2 ✅** (materials/lighting):
     - **D2a ✅**: baseColor textures (PNG/JPEG decode → hardware-sRGB RGBA8),
       per-primitive material instances, baseColorFactor/metallic/roughness
       uniforms, UV0 vertex stream.
     - **D2b ✅**: metallic-roughness + normal maps, glTF TANGENT →
       quaternion tangent frames (handedness via w sign).
-    - **D2c**: IBL (prefiltered environment) for correct metal response.
+    - **D2c ✅**: IBL — procedural equirect environment → GPU-prefiltered
+      reflections (IBLPrefilterContext) + 3-band SH irradiance, key light
+      aligned with the environment sun.
   - **D3**: physics (Jolt) — scenes, gravity, collisions.
   - **D4**: OBJ/glTF export (round-trip).
 - **Phase C** (WebView browsing) deferred behind Phase D.

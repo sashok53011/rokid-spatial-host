@@ -194,6 +194,7 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
         var sphereInstance: MaterialInstance?,
         val lightEntity: Int,
         val modelManager: ModelManager,
+        val ibl: IblBuilder,
         val panelEntities: MutableMap<String, Int> = mutableMapOf(),
         val panelInstances: MutableMap<String, MaterialInstance?> = mutableMapOf(),
         // video sphere resources (created lazily by requestVideoSphere)
@@ -258,17 +259,24 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
             val sphereMesh = Meshes.createSphere(e, radius = 30f)
             val quadMesh = Meshes.createQuad(e)
 
-            // Key light for lit models (D2 replaces/extends with IBL).
-            // Direction points where light TRAVELS: from behind/above the
-            // viewer forward so the camera-facing side of models is lit.
+            // Key light for lit models — direction aligned with the sun of
+            // the procedural IBL environment (D2c), so direct and ambient
+            // light agree. Travels -Z: lights the camera-facing side.
             val lightEntity = EntityManager.get().create()
             LightManager.Builder(LightManager.Type.DIRECTIONAL)
                 .color(1.0f, 0.98f, 0.94f)
                 .intensity(110_000f) // clear-day lux, as in Filament's samples
-                .direction(0.2f, -0.6f, -1.0f)
+                .direction(-0.42f, -0.66f, -0.62f)
                 .castShadows(false)
                 .build(e, lightEntity)
             s.addEntity(lightEntity)
+
+            // D2c: image-based lighting — procedural equirect → GPU-prefiltered
+            // reflections + 3-band SH irradiance (see IblBuilder).
+            val ibl = IblBuilder(e)
+            if (ibl.build()) {
+                s.indirectLight = ibl.indirectLight
+            }
 
             val sphereInstance = colorMaterial?.createInstance()
             sphereInstance?.setParameter(
@@ -292,6 +300,7 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
                 sphereInstance = sphereInstance,
                 lightEntity = lightEntity,
                 modelManager = ModelManager(e, s, litMaterial),
+                ibl = ibl,
             )
             Log.i(
                 TAG,
@@ -617,6 +626,7 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
     private fun destroySceneState(st: SceneState) {
         val e = st.engine
         st.modelManager.release()
+        st.ibl.release()
         for (entity in st.panelEntities.values) {
             st.scene.removeEntity(entity)
             e.destroyEntity(entity)
