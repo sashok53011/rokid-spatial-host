@@ -49,6 +49,31 @@ data class SpatialPanel(
     }
 }
 
+/**
+ * Ray vs axis-aligned box (slab method), both in the same space.
+ * Returns the ray parameter t >= 0 of the entry point, or null on miss.
+ * Works with non-normalized directions too (t is in direction units).
+ */
+fun hitBox(origin: FloatArray, dir: FloatArray, min: FloatArray, max: FloatArray): Float? {
+    var tMin = Float.NEGATIVE_INFINITY
+    var tMax = Float.POSITIVE_INFINITY
+    for (axis in 0..2) {
+        val o = origin[axis]
+        val d = dir[axis]
+        if (kotlin.math.abs(d) < 1e-9f) {
+            if (o < min[axis] || o > max[axis]) return null
+        } else {
+            var t1 = (min[axis] - o) / d
+            var t2 = (max[axis] - o) / d
+            if (t1 > t2) { val tmp = t1; t1 = t2; t2 = tmp }
+            if (t1 > tMin) tMin = t1
+            if (t2 < tMax) tMax = t2
+            if (tMin > tMax) return null
+        }
+    }
+    return if (tMin >= 0f) tMin else if (tMax >= 0f) 0f else null
+}
+
 /** Result of a ray vs panel intersection. */
 data class PanelHit(
     val panel: SpatialPanel,

@@ -93,6 +93,105 @@ class MainActivity : Activity() {
     @Volatile
     private var useLookOffset = false
 
+    // ------------------------------------------------------------------
+    // Model interaction (D1b): pick / rotate / scale / switch
+    // ------------------------------------------------------------------
+
+    /**
+     * One manipulable scene model. [matrix] = T(pos)·Ry(yaw)·Rx(pitch)·S·T(−c):
+     * auto-fit to ~1.1 m ([baseScale]) with a user scale multiplier.
+     */
+    private data class ModelObject(
+        val label: String,
+        val boundsMin: FloatArray,
+        val boundsMax: FloatArray,
+        val pos: FloatArray = floatArrayOf(0f, 0.1f, -2.2f),
+        var yawRad: Float = 0f,
+        var pitchRad: Float = 0f,
+        var userScale: Float = 1f,
+    ) {
+        val center: FloatArray = floatArrayOf(
+            (boundsMin[0] + boundsMax[0]) / 2f,
+            (boundsMin[1] + boundsMax[1]) / 2f,
+            (boundsMin[2] + boundsMax[2]) / 2f,
+        )
+
+        val baseScale: Float = 1.1f / maxOf(
+            boundsMax[0] - boundsMin[0],
+            boundsMax[1] - boundsMin[1],
+            boundsMax[2] - boundsMin[2],
+        ).coerceAtLeast(1e-3f)
+
+        fun matrix(): FloatArray {
+            val s = baseScale * userScale
+            val cy = kotlin.math.cos(yawRad)
+            val sy = kotlin.math.sin(yawRad)
+            val cp = kotlin.math.cos(pitchRad)
+            val sp = kotlin.math.sin(pitchRad)
+            // R = Ry(yaw)·Rx(pitch), column-major columns:
+            val c0 = floatArrayOf(cy, 0f, -sy)
+            val c1 = floatArrayOf(sy * sp, cp, cy * sp)
+            val c2 = floatArrayOf(sy * cp, -sp, cy * cp)
+            // translation = pos − s·R·c(center)
+            val rc = floatArrayOf(
+                c0[0] * center[0] + c1[0] * center[1] + c2[0] * center[2],
+                c0[1] * center[0] + c1[1] * center[1] + c2[1] * center[2],
+                c0[2] * center[0] + c1[2] * center[1] + c2[2] * center[2],
+            )
+            return floatArrayOf(
+                c0[0] * s, c0[1] * s, c0[2] * s, 0f,
+                c1[0] * s, c1[1] * s, c1[2] * s, 0f,
+                c2[0] * s, c2[1] * s, c2[2] * s, 0f,
+                pos[0] - s * rc[0], pos[1] - s * rc[1], pos[2] - s * rc[2], 1f,
+            )
+        }
+
+        /** Rᵀ — inverse of the yaw·pitch rotation. */
+        private fun invRot(v: FloatArray): FloatArray {
+            val cy = kotlin.math.cos(yawRad)
+            val sy = kotlin.math.sin(yawRad)
+            val cp = kotlin.math.cos(pitchRad)
+            val sp = kotlin.math.sin(pitchRad)
+            val x1 = v[0]
+            val y1 = v[1] * cp + v[2] * sp
+            val z1 = -v[1] * sp + v[2] * cp // Rxᵀ
+            return floatArrayOf(x1 * cy - z1 * sy, y1, x1 * sy + z1 * cy) // Ryᵀ
+        }
+
+        /** World point → model-local space (for the ray/AABB slab test). */
+        fun worldToLocal(p: FloatArray): FloatArray {
+            val s = baseScale * userScale
+            val l = invRot(floatArrayOf((p[0] - pos[0]) / s, (p[1] - pos[1]) / s, (p[2] - pos[2]) / s))
+            return floatArrayOf(l[0] + center[0], l[1] + center[1], l[2] + center[2])
+        }
+
+        /** World direction → model-local (scaled) direction. */
+        fun worldDirToLocal(d: FloatArray): FloatArray {
+            val s = baseScale * userScale
+            return invRot(floatArrayOf(d[0] / s, d[1] / s, d[2] / s))
+        }
+    }
+
+    private data class ModelFile(val label: String, val path: String)
+
+    private var modelSelected = false
+    private val sceneModels = mutableListOf<ModelObject>()
+    private val localModelFiles = mutableListOf<ModelFile>()
+    private var modelSourceIndex = 0 // 0 = bundled demo, 1.. = local files
+
+    /** Camera orientation = head pose ⊗ manual look offset. */
+    private fun currentCameraQuat(): FloatArray {
+        val p = activeBridge?.poses?.latest?.value
+            ?: return floatArrayOf(0f, 0f, 0f, 1f)
+        var q = floatArrayOf(p.qx, p.qy, p.qz, p.qw)
+        if (useLookOffset) {
+            val offset = com.rokid.spatialhost.bridge.Quat
+                .fromEulerYXZ(lookYaw, lookPitch, 0f)
+            q = com.rokid.spatialhost.bridge.Quat.mul(q, offset)
+        }
+        return q
+    }
+
     private val hudTick = object : Runnable {
         override fun run() {
             updateHud()
@@ -195,24 +294,52 @@ class MainActivity : Activity() {
         // Sources must exist before the auto-start timer fires.
         videoSources.addAll(PUBLIC_SOURCES)
         scanLocalVideos()
-        loadDemoModel()
+        scanLocalModelFiles()
+        loadCurrentModel()
 
         Log.i(TAG, UsbDiagnostics.describe(getSystemService(Context.USB_SERVICE) as UsbManager))
         connectChain()
     }
 
     /**
-     * Phase D1: parse the bundled demo glTF and place it in front of the user
-     * (auto-fit to ~1.1 m at (0, 0.1, -2.2)).
+     * Phase D1b: load the model at [modelSourceIndex] (0 = bundled demo,
+     * 1.. = scanned local .glb/.gltf) and place it in front of the user.
+     * The active [ModelObject] mirrors the placement sent to the renderer.
      */
-    private fun loadDemoModel() {
+    private fun loadCurrentModel() {
+        val label: String
+        val readBytes: () -> ByteArray
+        val resolver: ((String) -> ByteArray?)?
+        if (modelSourceIndex == 0) {
+            label = "DamagedHelmet"
+            readBytes = { assets.open("models/DamagedHelmet.glb").use { it.readBytes() } }
+            resolver = null
+        } else {
+            val file = localModelFiles.getOrNull(modelSourceIndex - 1)
+            if (file == null) {
+                modelSourceIndex = 0
+                loadCurrentModel()
+                return
+            }
+            label = file.label
+            val base = java.io.File(file.path).parentFile
+            readBytes = { java.io.File(file.path).readBytes() }
+            // .gltf with external .bin next to the JSON.
+            resolver = { uri ->
+                try {
+                    java.io.File(base, uri).readBytes()
+                } catch (_: Throwable) {
+                    null
+                }
+            }
+        }
         scope.launch {
             try {
                 val bytes = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                    assets.open("models/DamagedHelmet.glb").use { it.readBytes() }
+                    readBytes()
                 }
                 val model = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                    com.rokid.spatialhost.scene.gltf.GltfParser.parse(bytes, "DamagedHelmet")
+                    com.rokid.spatialhost.scene.gltf.GltfParser.parse(bytes, label, resolver)
                 }
                 Log.i(
                     TAG,
@@ -220,28 +347,62 @@ class MainActivity : Activity() {
                         "bounds=${model.boundsMin.joinToString("/") { "%.2f".format(it) }}.." +
                         "${model.boundsMax.joinToString("/") { "%.2f".format(it) }}",
                 )
-                val ext = maxOf(
-                    model.boundsMax[0] - model.boundsMin[0],
-                    model.boundsMax[1] - model.boundsMin[1],
-                    model.boundsMax[2] - model.boundsMin[2],
-                ).coerceAtLeast(1e-3f)
-                val scale = 1.1f / ext
-                val cx = (model.boundsMin[0] + model.boundsMax[0]) / 2f
-                val cy = (model.boundsMin[1] + model.boundsMax[1]) / 2f
-                val cz = (model.boundsMin[2] + model.boundsMax[2]) / 2f
-                // M = T(p) * S * T(-c): scale about the model center, then place
-                val placement = floatArrayOf(
-                    scale, 0f, 0f, 0f,
-                    0f, scale, 0f, 0f,
-                    0f, 0f, scale, 0f,
-                    0f - scale * cx,
-                    0.1f - scale * cy,
-                    -2.2f - scale * cz,
-                    1f,
+                val obj = ModelObject(
+                    label = label,
+                    boundsMin = model.boundsMin,
+                    boundsMax = model.boundsMax,
                 )
-                renderer.requestModel(model, placement)
+                sceneModels.clear()
+                sceneModels.add(obj)
+                modelSelected = false
+                renderer.requestModel(model, obj.matrix())
             } catch (t: Throwable) {
-                Log.e(TAG, "demo model load failed", t)
+                Log.e(TAG, "model load failed ($label)", t)
+            }
+        }
+    }
+
+    /** M: cycle demo → local models → demo. */
+    private fun nextModelSource() {
+        val count = 1 + localModelFiles.size
+        modelSourceIndex = (modelSourceIndex + 1) % count
+        modelSelected = false
+        val name = if (modelSourceIndex == 0) "demo:DamagedHelmet"
+        else localModelFiles[modelSourceIndex - 1].label
+        Log.i(TAG, "model source → $name")
+        loadCurrentModel()
+    }
+
+    /**
+     * Collect local .glb/.gltf files (USB stick / internal storage) for M.
+     * IO off the main thread; the list is only mutated on main.
+     */
+    private fun scanLocalModelFiles() {
+        scope.launch {
+            val found = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                val out = mutableListOf<ModelFile>()
+                for (dirPath in LOCAL_MODEL_DIRS) {
+                    val root = java.io.File(dirPath)
+                    if (!root.isDirectory) continue
+                    try {
+                        root.walkTopDown()
+                            .onFail { _, _ -> }
+                            .filter { f -> f.isFile && f.extension.lowercase() in MODEL_EXTENSIONS }
+                            .take(50 - out.size)
+                            .forEach { f -> out.add(ModelFile(f.nameWithoutExtension, f.absolutePath)) }
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "model scan $dirPath failed: ${t.message}")
+                    }
+                    if (out.size >= 50) break
+                }
+                out
+            }
+            localModelFiles.clear()
+            localModelFiles.addAll(found)
+            if (found.isNotEmpty()) {
+                Log.i(TAG, "local models: +${found.size} (${found.take(3).joinToString { it.label }})")
+            } else {
+                Log.i(TAG, "local models: none in $LOCAL_MODEL_DIRS")
             }
         }
     }
@@ -352,16 +513,7 @@ class MainActivity : Activity() {
         // manual look offset layered on top. The emulator bakes drag into its
         // own pose, so it must NOT double-apply the offset.
         useLookOffset = bridge !is EmulatorBridge
-        renderer.poseSupplier = {
-            val p = bridge.poses.latest.value
-            var q = floatArrayOf(p.qx, p.qy, p.qz, p.qw)
-            if (useLookOffset) {
-                val offset = com.rokid.spatialhost.bridge.Quat
-                    .fromEulerYXZ(lookYaw, lookPitch, 0f)
-                q = com.rokid.spatialhost.bridge.Quat.mul(q, offset)
-            }
-            q
-        }
+        renderer.poseSupplier = { currentCameraQuat() }
         Log.i(TAG, "active bridge: $s (lookOffset=$useLookOffset)")
         if (AUTO_START_VIDEO) {
             mainHandler.postDelayed({ if (activeBridge === bridge && !videoActive) startVideo() }, 3000)
@@ -396,7 +548,15 @@ class MainActivity : Activity() {
 
                 MotionEvent.ACTION_SCROLL -> {
                     val wheel = ev.getAxisValue(MotionEvent.AXIS_VSCROLL)
-                    if (wheel > 0.5f) nextVideoSource()
+                    val obj = if (modelSelected) sceneModels.firstOrNull() else null
+                    if (obj != null && wheel != 0f) {
+                        // Selected model: wheel scales it (else wheel = next video).
+                        val step = if (wheel > 0f) 1.12f else 1f / 1.12f
+                        obj.userScale = (obj.userScale * step).coerceIn(0.2f, 6f)
+                        renderer.setModelTransform(obj.matrix())
+                    } else if (wheel > 0.5f) {
+                        nextVideoSource()
+                    }
                     true
                 }
 
@@ -405,17 +565,27 @@ class MainActivity : Activity() {
                     val dy = ev.y - lastY
                     if (hypot(dx, dy) > 8f) moved = true
                     if (moved) {
-                        val emu = activeBridge as? EmulatorBridge
-                        if (emu != null) {
-                            emu.look(dx * radPerPx, -dy * radPerPx)
+                        val obj = if (modelSelected) sceneModels.firstOrNull() else null
+                        if (obj != null) {
+                            // Drag rotates the selected model (grab-the-surface
+                            // feel) instead of steering the view.
+                            obj.yawRad += dx * 0.005f
+                            obj.pitchRad = (obj.pitchRad + dy * 0.005f)
+                                .coerceIn(-1.4f, 1.4f)
+                            renderer.setModelTransform(obj.matrix())
                         } else {
-                            // Glasses own orientation — mouse steers a manual
-                            // offset layered on top in the poseSupplier.
-                            lookYaw += dx * radPerPx
-                            lookPitch = (lookPitch - dy * radPerPx)
-                                .coerceIn(-MAX_LOOK_PITCH, MAX_LOOK_PITCH)
+                            val emu = activeBridge as? EmulatorBridge
+                            if (emu != null) {
+                                emu.look(dx * radPerPx, -dy * radPerPx)
+                            } else {
+                                // Glasses own orientation — mouse steers a manual
+                                // offset layered on top in the poseSupplier.
+                                lookYaw += dx * radPerPx
+                                lookPitch = (lookPitch - dy * radPerPx)
+                                    .coerceIn(-MAX_LOOK_PITCH, MAX_LOOK_PITCH)
+                            }
+                            recognizer.onEvent(InputEvent.Drag(dx, dy))
                         }
-                        recognizer.onEvent(InputEvent.Drag(dx, dy))
                     }
                     lastX = ev.x
                     lastY = ev.y
@@ -447,6 +617,11 @@ class MainActivity : Activity() {
 
             KeyEvent.KEYCODE_N -> {
                 nextVideoSource()
+                return true
+            }
+
+            KeyEvent.KEYCODE_M -> {
+                nextModelSource()
                 return true
             }
         }
@@ -538,11 +713,27 @@ class MainActivity : Activity() {
         }
     }
 
-    /** 3DoF ray from current head pose → select the panel under the crosshair. */
+    /** 3DoF ray from current head pose → model first, then panel under crosshair. */
     private fun selectAtCrosshair() {
-        val pose = activeBridge?.poses?.latest?.value ?: return
-        val q = floatArrayOf(pose.qx, pose.qy, pose.qz, pose.qw)
+        val q = currentCameraQuat()
         val f = rotateVec(q, 0f, 0f, -1f)
+
+        // Model pick: camera-space ray → model-local space, slab test vs AABB.
+        val obj = sceneModels.firstOrNull()
+        if (obj != null) {
+            val localOrigin = obj.worldToLocal(floatArrayOf(0f, 0f, 0f)) // eye at world origin
+            val localDir = obj.worldDirToLocal(f)
+            val t = com.rokid.spatialhost.scene.hitBox(
+                localOrigin, localDir, obj.boundsMin, obj.boundsMax,
+            )
+            if (t != null) {
+                modelSelected = true
+                Log.i(TAG, "selected model ${obj.label} (t=${"%.2f".format(t)})")
+                return
+            }
+        }
+        modelSelected = false
+
         val dir = com.rokid.spatialhost.scene.Vec3(f[0], f[1], f[2])
         val hit = layoutEngine.hitTest(dir)
         if (hit != null) {
@@ -604,12 +795,22 @@ class MainActivity : Activity() {
                 )
             }
             append("panels : ${layoutEngine.panels.size} · focus=${navState.focusedPanelId ?: "-"} · sel=${navState.selectedPanelId ?: "-"}\n")
+            val m = sceneModels.firstOrNull()
+            if (m != null) {
+                append(
+                    "model  : ${m.label} · ${if (modelSelected) "SELECTED" else "idle"} " +
+                        "· ×${"%.2f".format(m.userScale)} · yaw ${Math.toDegrees(m.yawRad.toDouble()).toInt()}° " +
+                        "(tap=pick drag=rotate wheel=scale M=switch)\n",
+                )
+            } else {
+                append("model  : loading…\n")
+            }
             append(
                 "power  : ${stats.mahUsed.toInt()} mAh · ${"%.0f".format(stats.drainMa)} mA · " +
                     (if (stats.batteryPercent in 0..100) "${stats.batteryPercent}%" else "?") +
                     " · ${stats.elapsedSeconds}s\n",
             )
-            append("touch  : drag=look tap=select 2x-tap=recenter swipe/←→=focus H=hud V=video")
+            append("touch  : drag=look/rotate tap=select 2x-tap=recenter swipe/←→=focus H=hud V=video M=model")
             append("\n")
             append(
                 "video  : $videoStatus · ${videoSources[sourceIndex].first} " +
@@ -689,6 +890,12 @@ class MainActivity : Activity() {
             setOf("mp4", "mkv", "webm", "mov", "ts", "avi", "m4v")
         private val LOCAL_VIDEO_DIRS = listOf(
             "/sdcard/Movies", "/sdcard/Download", "/sdcard/DCIM/Camera", "/sdcard/video",
+        )
+
+        /** D1b: local glTF sources for the M key (push files via adb). */
+        private val MODEL_EXTENSIONS = setOf("glb", "gltf")
+        private val LOCAL_MODEL_DIRS = listOf(
+            "/sdcard/Download", "/sdcard/models", "/sdcard/Documents", "/sdcard/Movies",
         )
 
         private fun rotateVec(q: FloatArray, vx: Float, vy: Float, vz: Float): FloatArray {

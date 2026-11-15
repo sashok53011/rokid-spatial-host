@@ -89,8 +89,9 @@ class ModelManager(
                     )
                     .material(0, instance)
                     .boundingBox(boxOf(prim))
-                    // TEMP-D1: culling disabled while validating winding;
-                    // re-enable once placement is verified on device.
+                    // Culling stays OFF: arbitrary imported glTF may carry
+                    // either winding, and a wrongly culled model looks like a
+                    // loading bug (single-model scenes don't need the perf).
                     .culling(false)
                     .build(engine, entity)
                 // GlTF node hierarchy: primitive under its node entity, which
@@ -121,26 +122,6 @@ class ModelManager(
         val lm = current ?: return
         lm.matrix = matrix
         engine.transformManager.setTransform(lm.groupTransform, matrix)
-    }
-
-    /** Debug: world-space bounds of the loaded model (local bounds × group matrix). */
-    fun debugBounds(localMin: FloatArray, localMax: FloatArray): String {
-        val lm = current ?: return "no model"
-        val m = lm.matrix
-        var min = FloatArray(3) { Float.MAX_VALUE }
-        var max = FloatArray(3) { -Float.MAX_VALUE }
-        for (cx in 0..1) for (cy in 0..1) for (cz in 0..1) {
-            val lx = if (cx == 0) localMin[0] else localMax[0]
-            val ly = if (cy == 0) localMin[1] else localMax[1]
-            val lz = if (cz == 0) localMin[2] else localMax[2]
-            val w = com.rokid.spatialhost.scene.gltf.GltfParser.matTransform(m, lx, ly, lz)
-            for (k in 0..2) {
-                if (w[k] < min[k]) min[k] = w[k]
-                if (w[k] > max[k]) max[k] = w[k]
-            }
-        }
-        fun f(a: FloatArray) = a.joinToString(",") { "%.2f".format(it) }
-        return "local=${f(localMin)}..${f(localMax)} world=${f(min)}..${f(max)} group=${m.joinToString(",") { "%.2f".format(it) }}"
     }
 
     fun release() {

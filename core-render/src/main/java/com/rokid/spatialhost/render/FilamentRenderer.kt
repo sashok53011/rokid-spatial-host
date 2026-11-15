@@ -115,6 +115,14 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
         pendingModel = model to matrix
     }
 
+    /** Update the loaded model's placement (position/rotation/scale). */
+    @Volatile
+    private var pendingModelTransform: FloatArray? = null
+
+    fun setModelTransform(matrix: FloatArray) {
+        pendingModelTransform = matrix
+    }
+
     private var thread: Thread? = null
 
     @Volatile
@@ -322,7 +330,10 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
                 pendingModel?.let { (model, matrix) ->
                     pendingModel = null
                     sceneState?.modelManager?.load(model, matrix)
-                    Log.i(TAG, "model placement: " + (sceneState?.modelManager?.debugBounds(model.boundsMin, model.boundsMax) ?: "?"))
+                }
+                pendingModelTransform?.let { m ->
+                    pendingModelTransform = null
+                    sceneState?.modelManager?.setMatrix(m)
                 }
 
                 // Video/color sphere requests (color FIRST so a rapid

@@ -17,6 +17,8 @@ bridges so the same app drives multiple headsets.
 | Thermal/FPS governor + session power report (mAh, mA) | ✅ |
 | **360° video sphere: HLS/equirect/RTSP → media3 → Filament Stream** | ✅ V=toggle N=source |
 | Viture IMU protocol (Gen2 `0x0301`/`0x7308`, Gen1 Euler@18) | ✅ implemented, needs real-glasses verification |
+| **D1a: glTF import (own GLB/glTF2 parser → Filament, lit material)** | ✅ DamagedHelmet demo renders |
+| **D1b: model pick / rotate / scale / local-file switch** | ✅ tap=pick, drag=rotate, wheel=scale, M=source |
 | Release build (debug-key signed, arm64-only ~26 MB) | ✅ |
 
 ## Build & run
@@ -36,12 +38,24 @@ Requirements: JDK 17+, Android SDK (platform 35), Gradle wrapper 8.14.3
 
 | Input | Action |
 |---|---|
-| Mouse drag | Look around (on top of head tracking) |
-| Left click | Select panel under 3DoF crosshair ray |
+| Mouse drag | Look around (on top of head tracking) — **rotates the selected model** |
+| Left click | Select model under crosshair, else panel (click empty space = deselect) |
 | Double click / Right click | Recenter session frame |
 | Middle click / `V` | Video sphere on/off (360° backdrop ↔ live stream) |
-| Wheel / `N` | Next video source (equirect → LIVE → local files) |
+| Wheel | Next video source — **scales the selected model** (×0.2…×6) |
+| `M` | Next model source (bundled demo → local files → …) |
 | Arrow keys / swipe | Cycle focused panel (`H` toggles HUD) |
+
+### 3D models (Phase D1)
+
+The app ships a bundled `DamagedHelmet.glb` (parsed by the in-repo glTF 2.0
+parser — GLB/gltf, embedded & external buffers, node matrix|TRS hierarchy,
+POSITION/NORMAL/UV0, u16/u32 indices) and auto-fits it to ~1.1 m in front of
+you. Click it to select (HUD shows `SELECTED`), then drag to rotate and use
+the wheel to scale; click empty space to deselect. `M` cycles the bundled
+demo with local `.glb`/`.gltf` files auto-scanned from `/sdcard/Download`,
+`/sdcard/models`, `/sdcard/Documents`, `/sdcard/Movies` — push models with
+`adb push model.glb /sdcard/Download/` and press `M`.
 
 ### Video sources
 
@@ -107,8 +121,14 @@ stay isolated in `RokidMaxBridge.UXR_ENTRY_CANDIDATES`.
 - **Phase B2** ✅: textured external material (`video_external`), 360°
   equirect/HLS video sphere, media3 → Surface → Filament Stream, source
   cycling (V/N), RTSP module ready for `rtsp://` URLs.
-- **Phase C**: WebView-to-quad spatial browsing, PC desktop sharing via the
-  `verto-display-driver` IPC bridge (Python `vdd` agent over LAN).
-- **Phase D**: glTF/OBJ/STL import-export, Jolt physics, PBR/IBL materials.
+- **Phase D (glTF prototyping)** — in progress, sequential:
+  - **D1a ✅**: glTF import pipeline (parser → node hierarchy → Filament,
+    quaternion tangent frames, lit material + key light, auto-fit placement).
+  - **D1b ✅**: model manipulation (ray/AABB pick, drag-rotate, wheel-scale,
+    local-file scan + `M` switching).
+  - **D2**: textures/PBR maps + IBL for imported models.
+  - **D3**: physics (Jolt) — scenes, gravity, collisions.
+  - **D4**: OBJ/glTF export (round-trip).
+- **Phase C** (WebView browsing) deferred behind Phase D.
 - **Phase E**: cloud scene sync, multi-user collaboration, AIDL plugin API,
   cloud rendering pipeline.
