@@ -210,6 +210,7 @@ class MainActivity : Activity() {
     private val sceneModels = mutableListOf<ModelObject>()
     private val localModelFiles = mutableListOf<ModelFile>()
     private var modelSourceIndex = 0 // 0 = bundled demo, 1.. = local files
+    private var currentModel: com.rokid.spatialhost.scene.gltf.GltfModel? = null // D4 export
 
     // ------------------------------------------------------------------
     // D3: rigid-body physics (Jolt). While active the physics body drives
@@ -459,9 +460,37 @@ class MainActivity : Activity() {
         scanLocalVideos()
         scanLocalModelFiles()
         loadCurrentModel()
+        requestStorageIfNeeded()
 
         Log.i(TAG, UsbDiagnostics.describe(getSystemService(Context.USB_SERVICE) as UsbManager))
         connectChain()
+    }
+
+    /** Scanning /sdcard needs READ_EXTERNAL_STORAGE below Android 13. */
+    private fun requestStorageIfNeeded() {
+        if (android.os.Build.VERSION.SDK_INT > 32) return
+        if (checkSelfPermission(android.Manifest.permission.READ_EXTERNAL_STORAGE) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) return
+        requestPermissions(
+            arrayOf(android.Manifest.permission.READ_EXTERNAL_STORAGE),
+            REQ_STORAGE_PERMISSION,
+        )
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQ_STORAGE_PERMISSION &&
+            grantResults.firstOrNull() == android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            Log.i(TAG, "storage granted — rescanning local sources")
+            scanLocalVideos()
+            scanLocalModelFiles()
+        }
     }
 
     /**
@@ -518,6 +547,7 @@ class MainActivity : Activity() {
                 sceneModels.clear()
                 sceneModels.add(obj)
                 modelSelected = false
+                currentModel = model
                 renderer.requestModel(model, obj.matrix())
             } catch (t: Throwable) {
                 Log.e(TAG, "model load failed ($label)", t)
@@ -567,6 +597,88 @@ class MainActivity : Activity() {
             } else {
                 Log.i(TAG, "local models: none in $LOCAL_MODEL_DIRS")
             }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Phase D4: export (E) — .glb + .obj into Downloads, with an in-memory
+    // round-trip check (re-parse the GLB and compare structure counts).
+    // ------------------------------------------------------------------
+
+    private fun exportCurrentModel() {
+        val model = currentModel
+        val obj = sceneModels.firstOrNull()
+        if (model == null || obj == null) {
+            Log.i(TAG, "export: no model loaded")
+            return
+        }
+        scope.launch {
+            try {
+                val label = obj.label
+                val placement = obj.matrix()
+                val glb = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    com.rokid.spatialhost.scene.gltf.GltfExporter.toGlb(model)
+                }
+                val objText = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    com.rokid.spatialhost.scene.gltf.GltfExporter.toObj(model, placement, label)
+                }
+                val back = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    com.rokid.spatialhost.scene.gltf.GltfParser.parse(glb, label)
+                }
+                val ok = back.primitiveCount == model.primitiveCount &&
+                    back.nodes.size == model.nodes.size &&
+                    back.textures.size == model.textures.size &&
+                    back.materials.size == model.materials.size
+                val glbPath = saveToDownloads("$label.glb", glb, "model/gltf-binary")
+                val objPath = saveToDownloads(
+                    "$label.obj", objText.toByteArray(Charsets.UTF_8), "model/obj",
+                )
+                Log.i(
+                    TAG,
+                    "export ${if (ok) "ROUND-TRIP OK" else "ROUND-TRIP MISMATCH"}: " +
+                        "glb=$glbPath (${glb.size}B) obj=$objPath " +
+                        "prims=${model.primitiveCount}/${back.primitiveCount} " +
+                        "nodes=${model.nodes.size}/${back.nodes.size} " +
+                        "tex=${model.textures.size}/${back.textures.size}",
+                )
+            } catch (t: Throwable) {
+                Log.e(TAG, "export failed", t)
+            }
+        }
+    }
+
+    /** Write into the shared Downloads collection (MediaStore on Q+). */
+    private fun saveToDownloads(name: String, bytes: ByteArray, mime: String): String? {
+        return try {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                val values = android.content.ContentValues().apply {
+                    put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name)
+                    put(android.provider.MediaStore.MediaColumns.MIME_TYPE, mime)
+                    put(
+                        android.provider.MediaStore.MediaColumns.RELATIVE_PATH,
+                        android.os.Environment.DIRECTORY_DOWNLOADS,
+                    )
+                    put(android.provider.MediaStore.MediaColumns.IS_PENDING, 1)
+                }
+                val uri = contentResolver.insert(
+                    android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values,
+                ) ?: return null
+                contentResolver.openOutputStream(uri)?.use { it.write(bytes) }
+                values.clear()
+                values.put(android.provider.MediaStore.MediaColumns.IS_PENDING, 0)
+                contentResolver.update(uri, values, null, null)
+                uri.toString()
+            } else {
+                val dir = android.os.Environment.getExternalStoragePublicDirectory(
+                    android.os.Environment.DIRECTORY_DOWNLOADS,
+                )
+                val f = java.io.File(dir, name)
+                f.writeBytes(bytes)
+                f.absolutePath
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "save $name failed", t)
+            null
         }
     }
 
@@ -804,6 +916,11 @@ class MainActivity : Activity() {
 
             KeyEvent.KEYCODE_P -> {
                 togglePhysics()
+                return true
+            }
+
+            KeyEvent.KEYCODE_E -> {
+                exportCurrentModel()
                 return true
             }
         }
@@ -1064,6 +1181,8 @@ class MainActivity : Activity() {
         /** D3: fixed physics step (the tick runs every 16 ms). */
         private const val FIXED_PHYSICS_DT = 1f / 60f
         private const val FLOOR_TOP_Y = -1.0f // floor surface, world meters
+
+        private const val REQ_STORAGE_PERMISSION = 1001
 
         /** Verified-live public sources (wheel = next). */
         private val PUBLIC_SOURCES = listOf(

@@ -24,6 +24,7 @@ bridges so the same app drives multiple headsets.
 | **D2c: IBL — procedural equirect → GPU-prefiltered reflections + SH** | ✅ metals reflect the env |
 | **D3a: Jolt physics — gravity, floor, dynamic model body (P toggle)** | ✅ exact landing verified |
 | **D3b: grab-and-throw — spring drag, mouse-flick throws** | ✅ 3.16 m throw verified |
+| **D4: OBJ + glTF export (E) with verified round-trip** | ✅ Phase D complete |
 | Release build (debug-key signed, arm64-only ~26 MB) | ✅ |
 
 ## Build & run
@@ -50,6 +51,7 @@ Requirements: JDK 17+, Android SDK (platform 35), Gradle wrapper 8.14.3
 | Wheel | Next video source — **scales the selected model** (×0.2…×6) |
 | `M` | Next model source (bundled demo → local files → …) |
 | `P` | Physics on/off — the model drops onto the floor as a rigid body |
+| `E` | Export the current model as `.glb` + `.obj` into Downloads (round-trip verified) |
 | Arrow keys / swipe | Cycle focused panel (`H` toggles HUD) |
 
 ### 3D models (Phase D1)
@@ -148,7 +150,9 @@ stay isolated in `RokidMaxBridge.UXR_ENTRY_CANDIDATES`.
       transform sync back to the renderer (`P` toggle).
     - **D3b**: grab-and-throw interaction + on-scene toggle button
       (mouse-only affordance).
-  - **D4**: OBJ/glTF export (round-trip).
+  - **D4 ✅**: OBJ + glTF/GLB export (`E` → Downloads) with an in-memory
+    round-trip check; original textures copied verbatim. **Phase D
+    (glTF prototyping) is complete: import → edit → physics → export.**
 - **Phase C** (WebView browsing) deferred behind Phase D.
 - **Phase E**: cloud scene sync, multi-user collaboration, AIDL plugin API,
   cloud rendering pipeline.
