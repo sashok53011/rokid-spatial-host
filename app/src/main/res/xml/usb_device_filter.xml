@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- VITURE vendor id: 0x35CA (13770) — matches glasses.js VITURE_VID -->
+    <usb-device vendor-id="13770" />
+    <!-- Rokid vendor id: 0x04D2 (1234) — Rokid Max 1st Gen & friends -->
+    <usb-device vendor-id="1234" />
+</resources>
