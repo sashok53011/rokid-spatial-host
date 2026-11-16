@@ -69,18 +69,27 @@ class ModelManager(
         lm.matrix = matrix
 
         // Textures are decoded once per image and shared across primitives.
+        // Cache key distinguishes color-space usage: the same image may be
+        // sampled as sRGB (baseColor/emissive) or linear (normal/MR/AO).
         val texCache = mutableMapOf<Int, Pair<Texture, TextureSampler>>()
-        val white = buildSolidTexture() // baseColor / mrMap fallback
+        val white = buildSolidTexture() // baseColor / mrMap / aoMap fallback
+        val black = buildSolidTexture(0, 0, 0) // emissiveMap fallback (no glow)
         val flatNormal = buildFlatNormalTexture() // normalMap fallback (0,0,1)
         lm.textures.add(white.first)
+        lm.textures.add(black.first)
         lm.textures.add(flatNormal.first)
 
-        fun textureFor(texIdx: Int?, default: Pair<Texture, TextureSampler>): Pair<Texture, TextureSampler> {
+        fun textureFor(
+            texIdx: Int?,
+            default: Pair<Texture, TextureSampler>,
+            srgb: Boolean,
+        ): Pair<Texture, TextureSampler> {
             if (texIdx == null || texIdx !in model.textures.indices) return default
-            texCache[texIdx]?.let { return it }
-            val built = decodeTexture(model.textures[texIdx]) ?: return default
+            val key = if (srgb) texIdx else -(texIdx + 1)
+            texCache[key]?.let { return it }
+            val built = decodeTexture(model.textures[texIdx], srgb) ?: return default
             lm.textures.add(built.first)
-            texCache[texIdx] = built
+            texCache[key] = built
             return built
         }
 
@@ -108,9 +117,19 @@ class ModelManager(
                 fun bind(name: String, tex: Pair<Texture, TextureSampler>) {
                     instance.setParameter(name, tex.first, tex.second)
                 }
-                bind("baseColor", textureFor(matDef?.baseColorTexture, white))
-                bind("mrMap", textureFor(matDef?.metallicRoughnessTexture, white))
-                bind("normalMap", textureFor(matDef?.normalTexture, flatNormal))
+                bind("baseColor", textureFor(matDef?.baseColorTexture, white, srgb = true))
+                bind("mrMap", textureFor(matDef?.metallicRoughnessTexture, white, srgb = false))
+                bind("normalMap", textureFor(matDef?.normalTexture, flatNormal, srgb = false))
+                bind("emissiveMap", textureFor(matDef?.emissiveTexture, black, srgb = true))
+                bind("aoMap", textureFor(matDef?.occlusionTexture, white, srgb = false))
+                // emissive.rgb = emissiveFactor, emissive.w = occlusionStrength
+                instance.setParameter(
+                    "emissive",
+                    matDef?.emissiveFactor?.getOrNull(0) ?: 0f,
+                    matDef?.emissiveFactor?.getOrNull(1) ?: 0f,
+                    matDef?.emissiveFactor?.getOrNull(2) ?: 0f,
+                    matDef?.occlusionStrength ?: 1f,
+                )
                 lm.instances.add(instance)
 
                 val normals = prim.normals ?: generateFlatNormals(prim.positions)
@@ -285,8 +304,16 @@ class ModelManager(
     // so the GPU linearizes on sample — normal/MR maps in D2b use RGBA8)
     // ------------------------------------------------------------------
 
-    /** Decode a glTF image and upload it as a Filament texture. */
-    private fun decodeTexture(gt: GltfTexture): Pair<Texture, TextureSampler>? {
+    /**
+     * Decode a glTF image and upload it as a Filament texture.
+     * [srgb] selects the internal format: color maps (baseColor/emissive)
+     * are sRGB (GPU linearizes on sample), data maps (normal/MR/AO) must
+     * stay linear RGBA8.
+     */
+    private fun decodeTexture(
+        gt: GltfTexture,
+        srgb: Boolean,
+    ): Pair<Texture, TextureSampler>? {
         val opts = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 }
         val bmp = BitmapFactory.decodeByteArray(gt.image, 0, gt.image.size, opts)
         if (bmp == null) {
@@ -298,7 +325,7 @@ class ModelManager(
         val px = ByteArray(w * h * 4)
         bmp.copyPixelsToBuffer(ByteBuffer.wrap(px))
         bmp.recycle()
-        val tex = uploadRGBA(w, h, px, srgb = true) ?: return null
+        val tex = uploadRGBA(w, h, px, srgb = srgb) ?: return null
         val sampler = TextureSampler(
             TextureSampler.MinFilter.LINEAR,
             TextureSampler.MagFilter.LINEAR,
@@ -306,14 +333,14 @@ class ModelManager(
             glWrap(gt.wrapT),
             glWrap(gt.wrapS),
         )
-        Log.i(TAG, "texture ${w}x$h decoded (${gt.image.size}B)")
+        Log.i(TAG, "texture ${w}x$h decoded (${gt.image.size}B, ${if (srgb) "sRGB" else "linear"})")
         return tex to sampler
     }
 
-    /** 1×1 white fallback so primitives without a map still bind the sampler. */
-    private fun buildSolidTexture(): Pair<Texture, TextureSampler> {
-        val tex = uploadRGBA(1, 1, byteArrayOf(-1, -1, -1, -1), srgb = true)
-            ?: error("white texture upload failed")
+    /** 1×1 solid fallback (white/black) so samplers always bind. */
+    private fun buildSolidTexture(r: Int = 255, g: Int = 255, b: Int = 255): Pair<Texture, TextureSampler> {
+        val tex = uploadRGBA(1, 1, byteArrayOf(r.toByte(), g.toByte(), b.toByte(), -1), srgb = true)
+            ?: error("solid texture upload failed")
         return tex to defaultSampler()
     }
 

@@ -176,6 +176,18 @@ object GltfExporter {
             mat.metallicRoughnessTexture?.let { if (it in model.textures.indices) pbr.put("metallicRoughnessTexture", JSONObject_().put("index", it)) }
             val m = JSONObject_().put("name", mat.name).put("pbrMetallicRoughness", pbr)
             mat.normalTexture?.let { if (it in model.textures.indices) m.put("normalTexture", JSONObject_().put("index", it)) }
+            m.put("emissiveFactor", floatList(mat.emissiveFactor, -1))
+            mat.emissiveTexture?.let {
+                if (it in model.textures.indices) m.put("emissiveTexture", JSONObject_().put("index", it))
+            }
+            mat.occlusionTexture?.let {
+                if (it in model.textures.indices) {
+                    m.put(
+                        "occlusionTexture",
+                        JSONObject_().put("index", it).put("strength", mat.occlusionStrength.toDouble()),
+                    )
+                }
+            }
             materialsJson.put(m)
         }
 

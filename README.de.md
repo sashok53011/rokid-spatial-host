@@ -42,6 +42,7 @@ der Pfad ist also reproduzierbar.
 | **D4: OBJ- + glTF-Export (E) mit verifiziertem Round-Trip** | ✅ Phase D abgeschlossen |
 | **Panel-Widgets + Video-Deck: PLAY/SRC/LOOP/SEEK per Blick-Klick** | ✅ |
 | **IBL-Skybox-Hintergrund + beleuchteter Schattenboden + dynamische Schatten** | ✅ |
+| **Emissive- + AO-Maps; sRGB/Linear-Farbraum-Split gefixt** | ✅ |
 | Release-Build (mit Debug-Key signiert, arm64-only ~26 MB) | ✅ |
 
 ## Voraussetzungen
@@ -378,8 +379,11 @@ nächsten echten Klick** (Symptom: zweimal klicken; in adb-Skripten tat
 
 ### Nächste Verbesserungen (klein, konkret)
 
-- [ ] **Emissive- + AO-Maps** aus glTF (Texturindizes hält der Parser
-      schon; ein weiterer Sampler in `lit_pbr`)
+- [x] **Emissive- + AO-Maps** aus glTF — fertig: geparst (emissiveFactor,
+      emissive/occlusion-Texturen + strength), `lit_pbr` hat jetzt
+      emissiveMap/aoMap; dazu der Farbraum-Split gefixt (baseColor +
+      emissive sRGB, normal/MR/AO linear — Daten-Maps wurden vorher
+      fälschlich als sRGB dekodiert)
 - [x] **Sichtbarer Skybox** aus der IBL-Umgebung — fertig: Himmel aus den
       gefilterten Reflections (mip0); im Skybox-Modus wird die flache
       Farbsphäre NICHT erzeugt (bleibt Fallback bei IBL-Ausfall)

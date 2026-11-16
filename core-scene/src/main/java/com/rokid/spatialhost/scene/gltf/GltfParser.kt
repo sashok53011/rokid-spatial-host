@@ -68,6 +68,12 @@ data class GltfMaterial(
     val roughnessFactor: Float,            // default 1
     val metallicRoughnessTexture: Int?,
     val normalTexture: Int?,
+    /** Emissive light rgb (glTF emissiveFactor, default 0,0,0). */
+    val emissiveFactor: FloatArray = floatArrayOf(0f, 0f, 0f),
+    val emissiveTexture: Int? = null,
+    /** Ambient-occlusion map (affects indirect/IBL light only). */
+    val occlusionTexture: Int? = null,
+    val occlusionStrength: Float = 1f,      // default 1
 )
 
 /**
@@ -207,6 +213,7 @@ object GltfParser {
             val m = materialsJson!!.getJSONObject(i)
             val pbr = m.optJSONObject("pbrMetallicRoughness")
             val baseColor = pbr?.optJSONArray("baseColorFactor")
+            val emissive = m.optJSONArray("emissiveFactor")
             GltfMaterial(
                 name = m.optString("name", "material$i"),
                 baseColorFactor = FloatArray(4) {
@@ -224,6 +231,14 @@ object GltfParser {
                 metallicRoughnessTexture =
                     pbr?.optJSONObject("metallicRoughnessTexture")?.optInt("index"),
                 normalTexture = m.optJSONObject("normalTexture")?.optInt("index"),
+                emissiveFactor = FloatArray(3) {
+                    if (emissive != null && it < emissive.length()) emissive.getDouble(it).toFloat()
+                    else 0f
+                },
+                emissiveTexture = m.optJSONObject("emissiveTexture")?.optInt("index"),
+                occlusionTexture = m.optJSONObject("occlusionTexture")?.optInt("index"),
+                occlusionStrength = m.optJSONObject("occlusionTexture")
+                    ?.optDouble("strength", 1.0)?.toFloat() ?: 1f,
             )
         }
 

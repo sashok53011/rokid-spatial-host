@@ -41,6 +41,7 @@ path can be reproduced.
 | **D4: OBJ + glTF export (E) with verified round-trip** | ✅ Phase D complete |
 | **Panel widgets + video deck: PLAY/SRC/LOOP/SEEK via gaze-click** | ✅ |
 | **IBL skybox background + lit shadow floor + dynamic shadows** | ✅ |
+| **Emissive + AO maps; sRGB/linear color-space split fixed** | ✅ |
 | Release build (debug-key signed, arm64-only ~26 MB) | ✅ |
 
 ## Requirements
@@ -359,8 +360,11 @@ right after `input swipe` did nothing).
 
 ### Near-term improvements (small, concrete)
 
-- [ ] **Emissive + AO maps** from glTF (parser already keeps texture
-      indices; one more sampler in `lit_pbr`)
+- [x] **Emissive + AO maps** from glTF — done: parsed (emissiveFactor,
+      emissive/occlusion textures + strength), `lit_pbr` gained
+      emissiveMap/aoMap; also fixed the color-space split (baseColor +
+      emissive sRGB, normal/MR/AO linear — data maps were wrongly
+      sRGB-decoded before)
 - [x] **Visible skybox** from the IBL environment — done: skybox from the
       prefiltered reflections (mip0); in skybox mode the flat color
       sphere is skipped (kept as fallback if IBL fails)

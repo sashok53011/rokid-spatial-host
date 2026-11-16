@@ -117,6 +117,8 @@ object MaterialFactory {
                 .require(MaterialBuilder.VertexAttribute.UV0)
                 .uniformParameter(MaterialBuilder.UniformType.FLOAT4, "color")
                 .uniformParameter(MaterialBuilder.UniformType.FLOAT2, "mr")
+                // emissive: rgb = glTF emissiveFactor, w = occlusionStrength
+                .uniformParameter(MaterialBuilder.UniformType.FLOAT4, "emissive")
                 .samplerParameter(
                     MaterialBuilder.SamplerType.SAMPLER_2D,
                     MaterialBuilder.SamplerFormat.FLOAT,
@@ -135,6 +137,18 @@ object MaterialFactory {
                     MaterialBuilder.ParameterPrecision.DEFAULT,
                     "normalMap",
                 )
+                .samplerParameter(
+                    MaterialBuilder.SamplerType.SAMPLER_2D,
+                    MaterialBuilder.SamplerFormat.FLOAT,
+                    MaterialBuilder.ParameterPrecision.DEFAULT,
+                    "emissiveMap",
+                )
+                .samplerParameter(
+                    MaterialBuilder.SamplerType.SAMPLER_2D,
+                    MaterialBuilder.SamplerFormat.FLOAT,
+                    MaterialBuilder.ParameterPrecision.DEFAULT,
+                    "aoMap",
+                )
                 .material(
                     // Normal first, exactly as in the docs' normal-mapping
                     // example (tangent space, +Z out of the surface).
@@ -147,6 +161,11 @@ object MaterialFactory {
                         "  vec4 mr = texture(materialParams_mrMap, getUV0());" +
                         "  material.metallic = clamp(materialParams.mr.x * mr.b, 0.0, 1.0);" +
                         "  material.roughness = clamp(materialParams.mr.y * mr.g, 0.04, 1.0);" +
+                        "  material.emissive = vec4(materialParams.emissive.rgb *" +
+                        "      texture(materialParams_emissiveMap, getUV0()).rgb, 1.0);" +
+                        "  material.ambientOcclusion = mix(1.0," +
+                        "      texture(materialParams_aoMap, getUV0()).r," +
+                        "      materialParams.emissive.w);" +
                         "}",
                 )
                 .platform(MaterialBuilder.Platform.MOBILE)
