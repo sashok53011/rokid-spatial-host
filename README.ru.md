@@ -19,6 +19,8 @@ PBR-материалами, физика твёрдых тел и экспорт
 
 **Языки**: [English](README.md) · [Deutsch](README.de.md) · Русский (этот файл)
 
+[![CI](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
+
 ## Статус
 
 | Возможность | Состояние |
@@ -90,6 +92,19 @@ adb logcat -s SpatialHost FilamentRenderer MaterialFactory ModelManager \
 Напоминание: в `gradle.properties` зафиксирован **Filament1.75.1**
 (для1.80.x нужен compileSdk37), **Kotlin2.4.x**, AGP из каталога
 версий.
+
+### Тесты и CI
+
+Asset-конвейер закрыт чисто-JVM юнит-тестами в `core-scene` (round-trip
+парсинга glTF ↔ экспорта GLB, включая встроенный DamagedHelmet; парсинг
+бинарного/ASCII STL):
+
+```powershell
+.\gradlew.bat :core-scene:test
+```
+
+GitHub Actions (`.github/workflows/ci.yml`) гоняет `test assembleDebug`
+на каждый push/PR — на раннере JDK17 + Android SDK35.
 
 ## Управление (дружелюбно к мыши без клавиатуры)
 

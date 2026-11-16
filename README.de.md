@@ -20,6 +20,8 @@ der Pfad ist also reproduzierbar.
 
 **Sprachen**: [English](README.md) · [Русский](README.ru.md) · Deutsch (diese Datei)
 
+[![CI](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
+
 ## Status
 
 | Feature | Zustand |
@@ -90,6 +92,19 @@ Bridge verbindet sich selbst, das360°-Video startet ~3 s später.
 Zusammenfassung: `gradle.properties` pinnt **Filament 1.75.1**
 (für 1.80.x braucht man compileSdk 37), **Kotlin 2.4.x**, AGP aus dem
 Version-Catalog.
+
+### Tests & CI
+
+Die Asset-Pipeline ist durch rein-JVM-Unit-Tests in `core-scene` gedeckt
+(glTF-Parse ↔ GLB-Export-Round-Trip inkl. mitgeliefertem
+DamagedHelmet, Binär-/ASCII-STL-Parsing):
+
+```powershell
+.\gradlew.bat :core-scene:test
+```
+
+GitHub Actions (`.github/workflows/ci.yml`) führt bei jedem Push/PR
+`test assembleDebug` aus — JDK17 + Android SDK35 auf dem Runner.
 
 ## Steuerung (mausfreundlich, ohne Touch)
 

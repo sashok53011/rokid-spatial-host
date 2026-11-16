@@ -26,4 +26,9 @@ kotlin {
 
 dependencies {
     implementation(libs.kotlin.stdlib)
+
+    // Unit tests (pure JVM): real org.json shadows the android.jar stub,
+    // which otherwise throws "not mocked".
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }

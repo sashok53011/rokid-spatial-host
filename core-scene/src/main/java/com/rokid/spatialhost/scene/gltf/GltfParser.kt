@@ -136,7 +136,7 @@ object GltfParser {
                     uri.startsWith("data:") -> {
                         val idx = uri.indexOf("base64,")
                         require(idx > 0) { "non-base64 data uri unsupported" }
-                        android.util.Base64.decode(uri.substring(idx + 7), android.util.Base64.DEFAULT)
+                        java.util.Base64.getDecoder().decode(uri.substring(idx + 7))
                     }
 
                     else -> basePathResolver?.invoke(uri)
@@ -162,7 +162,7 @@ object GltfParser {
             uri.startsWith("data:") -> {
                 val idx = uri.indexOf("base64,")
                 require(idx > 0) { "non-base64 data uri unsupported" }
-                android.util.Base64.decode(uri.substring(idx + 7), android.util.Base64.DEFAULT)
+                java.util.Base64.getDecoder().decode(uri.substring(idx + 7))
             }
 
             else -> basePathResolver?.invoke(uri)

@@ -1,6 +1,8 @@
 # rokid-spatial-host
 
-**Languages**: [Русский](README.ru.md) · [Deutsch](README.de.md) · English (diese Datei)
+**Languages**: [Русский](README.ru.md) · [Deutsch](README.de.md) · English (this file)
+
+[![CI](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
 
 Native Android spatial host for **Rokid Max** AR glasses — an immersive
 3DoF environment built in Kotlin + Filament: 360° video sphere, floating
@@ -89,6 +91,19 @@ later.
 
 Requirements recap: `gradle.properties` pins **Filament 1.75.1** (1.80.x
 needs compileSdk 37), **Kotlin 2.4.x**, AGP from the version catalog.
+
+### Tests & CI
+
+The asset pipeline is guarded by pure-JVM unit tests in `core-scene`
+(glTF parse ↔ GLB export round-trip incl. the bundled DamagedHelmet,
+binary/ASCII STL parsing):
+
+```powershell
+.\gradlew.bat :core-scene:test
+```
+
+GitHub Actions (`.github/workflows/ci.yml`) runs `test assembleDebug`
+on every push/PR — JDK17 + Android SDK35 on the runner.
 
 ## Controls (mouse-only friendly)
 
