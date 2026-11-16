@@ -61,6 +61,15 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
     /** Returns head orientation quaternion [x,y,z,w] in the session frame. */
     var poseSupplier: (() -> FloatArray)? = null
 
+    /**
+     * Fired on the MAIN thread whenever the scene (re)creates — the app
+     * re-pushes one-shot content (panels, UI textures, model, video),
+     * because the first-run settings screen destroys the surface and the
+     * render loop fully rebuilds from scratch.
+     */
+    @Volatile
+    var onSceneReady: (() -> Unit)? = null
+
     /** Frames per second target; updated by ThermalGovernor. */
     @Volatile
     var targetFps: Int = 90
@@ -363,6 +372,7 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
                 "scene after sphere: entities=${s.entityCount} renderables=${s.renderableCount} " +
                     "material=${colorMaterial != null}",
             )
+            onSceneReady?.let { cb -> Handler(Looper.getMainLooper()).post(cb) }
 
             var frames = 0
             var statsStart = System.nanoTime()

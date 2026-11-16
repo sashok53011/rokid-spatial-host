@@ -433,6 +433,10 @@ class MainActivity : Activity() {
         setContentView(root)
 
         renderer = FilamentRenderer(surfaceView)
+        // The scene may be FULLY rebuilt (the first-run all-files settings
+        // screen destroys the surface): re-push everything one-shot that
+        // the pending channels consumed.
+        renderer.onSceneReady = { reapplySceneContent() }
         layoutEngine = LayoutEngine().apply {
             defaultArc(count = 3)
             add(
@@ -447,15 +451,7 @@ class MainActivity : Activity() {
                 ),
             )
         }
-        renderer.setPanels(
-            layoutEngine.panels.values.map {
-                com.rokid.spatialhost.render.PanelSpec(
-                    it.id, it.widthM, it.heightM,
-                    it.position.x, it.position.y, it.position.z,
-                    persistent = it.persistent,
-                )
-            },
-        )
+        renderer.setPanels(panelSpecs())
         pushAllPanelUi() // cards instead of the white fallback texture
         recognizer = GestureRecognizer()
         thermal = ThermalGovernor(this)
@@ -477,6 +473,7 @@ class MainActivity : Activity() {
         scanLocalModelFiles()
         loadCurrentModel()
         requestStorageIfNeeded()
+        requestAllFilesAccessIfNeeded()
 
         Log.i(TAG, UsbDiagnostics.describe(getSystemService(Context.USB_SERVICE) as UsbManager))
         connectChain()
@@ -492,6 +489,27 @@ class MainActivity : Activity() {
             arrayOf(android.Manifest.permission.READ_EXTERNAL_STORAGE),
             REQ_STORAGE_PERMISSION,
         )
+    }
+
+    /**
+     * All-files access for the file scanners: scoped storage hides
+     * non-media files (.glb/.stl/arbitrary video) from READ_EXTERNAL_,
+     * so without MANAGE_EXTERNAL_STORAGE the walk only ever sees the
+     * app's own exports. Opens the toggle once (it stops after grant).
+     */
+    private fun requestAllFilesAccessIfNeeded() {
+        if (android.os.Build.VERSION.SDK_INT < 30) return
+        if (android.os.Environment.isExternalStorageManager()) return
+        try {
+            startActivity(
+                Intent(
+                    android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                    android.net.Uri.parse("package:$packageName"),
+                ),
+            )
+        } catch (t: Throwable) {
+            Log.w(TAG, "all-files access settings unavailable: $t")
+        }
     }
 
     override fun onRequestPermissionsResult(
@@ -518,10 +536,12 @@ class MainActivity : Activity() {
         val label: String
         val readBytes: () -> ByteArray
         val resolver: ((String) -> ByteArray?)?
+        val isStl: Boolean
         if (modelSourceIndex == 0) {
             label = "DamagedHelmet"
             readBytes = { assets.open("models/DamagedHelmet.glb").use { it.readBytes() } }
             resolver = null
+            isStl = false
         } else {
             val file = localModelFiles.getOrNull(modelSourceIndex - 1)
             if (file == null) {
@@ -532,6 +552,7 @@ class MainActivity : Activity() {
             label = file.label
             val base = java.io.File(file.path).parentFile
             readBytes = { java.io.File(file.path).readBytes() }
+            isStl = file.path.endsWith(".stl", ignoreCase = true)
             // .gltf with external .bin next to the JSON.
             resolver = { uri ->
                 try {
@@ -547,7 +568,11 @@ class MainActivity : Activity() {
                     readBytes()
                 }
                 val model = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                    com.rokid.spatialhost.scene.gltf.GltfParser.parse(bytes, label, resolver)
+                    if (isStl) {
+                        com.rokid.spatialhost.scene.stl.StlParser.parse(bytes, label)
+                    } else {
+                        com.rokid.spatialhost.scene.gltf.GltfParser.parse(bytes, label, resolver)
+                    }
                 }
                 Log.i(
                     TAG,
@@ -954,6 +979,7 @@ class MainActivity : Activity() {
 
     private var videoActive = false // main thread only
     private var videoLooping = false
+    private var lastLoggedVideoStatus: String? = null
     private var videoUiBitmap: android.graphics.Bitmap? = null
     private var videoUiPixels: ByteArray? = null
     private var lastVideoUiSig: String? = null
@@ -964,6 +990,7 @@ class MainActivity : Activity() {
      * also works — the media3 RTSP module is on the classpath).
      */
     private fun toggleVideo() {
+        Log.i(TAG, "toggleVideo: videoActive=$videoActive status=$videoStatus")
         if (videoActive) stopVideo() else startVideo()
     }
 
@@ -1078,6 +1105,53 @@ class MainActivity : Activity() {
     /** All panels get a card (arc panels: title-only) — no white slabs. */
     private fun pushAllPanelUi() {
         layoutEngine.panels.keys.forEach { pushPanelUi(it) }
+    }
+
+    private fun panelSpecs() = layoutEngine.panels.values.map {
+        com.rokid.spatialhost.render.PanelSpec(
+            it.id, it.widthM, it.heightM,
+            it.position.x, it.position.y, it.position.z,
+            persistent = it.persistent,
+        )
+    }
+
+    /**
+     * Scene (re)created callback: the render loop's pending channels were
+     * one-shot, so re-push panels, UI textures, the model and the video
+     * surface (first-run settings churn destroys the surface once).
+     */
+    private var firstSceneApply = true
+
+    private fun reapplySceneContent() {
+        // First creation: onCreate's own queues are still pending — the
+        // reapply matters only after a rebuild (settings churn).
+        if (firstSceneApply) {
+            firstSceneApply = false
+            Log.i(TAG, "scene ready (initial — content already queued)")
+            return
+        }
+        renderer.setPanels(panelSpecs())
+        pushAllPanelUi()
+        val model = currentModel
+        val obj = sceneModels.firstOrNull()
+        if (model != null && obj != null) {
+            renderer.requestModel(model, obj.matrix())
+        }
+        if (videoActive) {
+            // Fresh prepare on the new surface: a bare setSurface after the
+            // churn leaves ExoPlayer in ERROR_CODE_DECODING_FAILED.
+            renderer.requestVideoSphere { surface ->
+                streamPlayer?.let { p ->
+                    p.setSurface(surface)
+                    p.prepare(videoSources.getOrNull(sourceIndex)?.second ?: return@let, lowLatency = true)
+                    p.setLooping(videoLooping)
+                }
+            }
+        }
+        Log.i(
+            TAG,
+            "scene content re-applied (model=${obj?.label ?: "-"}, video=$videoActive)",
+        )
     }
 
     private fun pushVideoPanelUi() = pushPanelUi(VIDEO_PANEL_ID)
@@ -1216,6 +1290,14 @@ class MainActivity : Activity() {
         renderer.targetFps = thermal.budget.value.targetFps
 
         // Video deck: redraw when its state (or the playhead) changes.
+        if (videoStatus != lastLoggedVideoStatus) {
+            lastLoggedVideoStatus = videoStatus
+            Log.i(
+                TAG,
+                "videoStatus → $videoStatus (active=$videoActive " +
+                    "playing=${streamPlayer?.playing})",
+            )
+        }
         val deckSig = "$videoStatus|$sourceIndex|${streamPlayer?.playing}" +
             "|${(streamPlayer?.positionMs ?: 0L) / 1000}" +
             "|${streamPlayer?.durationMs ?: 0L}|$videoLooping|${streamPlayer != null}"
@@ -1369,8 +1451,8 @@ class MainActivity : Activity() {
             "/sdcard/Movies", "/sdcard/Download", "/sdcard/DCIM/Camera", "/sdcard/video",
         )
 
-        /** D1b: local glTF sources for the M key (push files via adb). */
-        private val MODEL_EXTENSIONS = setOf("glb", "gltf")
+        /** D1b: local glTF/STL sources for the M key (push files via adb). */
+        private val MODEL_EXTENSIONS = setOf("glb", "gltf", "stl")
         private val LOCAL_MODEL_DIRS = listOf(
             "/sdcard/Download", "/sdcard/models", "/sdcard/Documents", "/sdcard/Movies",
         )

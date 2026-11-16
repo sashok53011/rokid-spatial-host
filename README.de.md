@@ -43,6 +43,7 @@ der Pfad ist also reproduzierbar.
 | **Panel-Widgets + Video-Deck: PLAY/SRC/LOOP/SEEK per Blick-Klick** | ✅ |
 | **IBL-Skybox-Hintergrund + beleuchteter Schattenboden + dynamische Schatten** | ✅ |
 | **Emissive- + AO-Maps; sRGB/Linear-Farbraum-Split gefixt** | ✅ |
+| **STL-Import + All-Files-Modell-Scan + Szenen-Rebuild-Resilienz** | ✅ |
 | Release-Build (mit Debug-Key signiert, arm64-only ~26 MB) | ✅ |
 
 ## Voraussetzungen
@@ -348,6 +349,24 @@ nächsten echten Klick** (Symptom: zweimal klicken; in adb-Skripten tat
   ließen alle Panels das zuletzt gezeichnete Bild zeigen — der Kanal
   klont Pixel jetzt.
 
+### Speicher & Szenen-Rebuilds
+
+* **Scoped Storage versteckt Nicht-Media-Dateien**:
+  `READ_EXTERNAL_STORAGE` gibt nur Medien frei — der Walk sieht fremde
+  per adb geschobene `.glb`/`.stl`/Videos nie (nur die eigenen
+  MediaStore-Exporte). Die Scanner brauchen deshalb
+  `MANAGE_EXTERNAL_STORAGE`; die App öffnet den Umschalter einmalig beim
+  ersten Start (einmal erlauben — oder
+  `adb shell appops set <pkg> MANAGE_EXTERNAL_STORAGE allow`).
+* **Der Einstellungs-Screen des ersten Starts zerstört die Surface** →
+  der Renderloop stoppt und baut komplett neu auf (Engine, Szene,
+  Materialien). Die Einmal-Pending-Kanäle (Panels, UI-Texturen, Modell,
+  Video) waren bereits verbraucht — ohne erneutes Push kam die Szene
+  LEER zurück. Behoben über den `onSceneReady`-Callback (Mainthread):
+  Panels neu setzen, UI-Texturen erneut pushen, Modell neu anfordern und
+  Video **neu preparieren** (ein blankes `setSurface` nach dem Churn
+  lässt ExoPlayer in `ERROR_CODE_DECODING_FAILED`).
+
 ## Debugging-Tipps
 
 * **Screenshots**: PowerShell `>` zerstört Binärdaten —
@@ -392,8 +411,9 @@ nächsten echten Klick** (Symptom: zweimal klicken; in adb-Skripten tat
       Arc-Panels ausgeschlossen (unlit dürfen nicht werfen)
 - [ ] **Tonemapping/HDR**: Post-Processing ist gerade wegen Performance
       aus — ACES mit Bloom für Emit/Neon zurückholen
-- [ ] **STL- + OBJ-Import** (Export exists; Import schließt den Kreis
-      für3D-Druck-Workflows)
+- [x] **STL-Import** (binär + ASCII → GltfModel-Adapter; der
+      3D-Druck-Kreis schließt: drücken → push → scan → editieren →
+      export) — **OBJ-Import** offen
 - [ ] **Mehrere Modelle gleichzeitig** — `ModelManager` lädt schon eine
       „Gruppe"; auf eine Szenenliste erweitern mit per-Object
       select/move/delete (Fundament für die Szenen unten)

@@ -168,12 +168,20 @@ class ModelManager(
         for (root in model.sceneRootNodes) walk(root, groupTf)
 
         current = lm
+        model.primitives.values.firstOrNull()?.firstOrNull()?.let { p ->
+            Log.i(
+                TAG,
+                "first verts: (${p.positions[0]}, ${p.positions[1]}, ${p.positions[2]}) " +
+                    "n=${p.positions.size / 3}",
+            )
+        }
         Log.i(
             TAG,
             "model loaded: nodes=${model.nodes.size} prims=${model.primitiveCount} " +
                 "renderables=${lm.primitiveEntities.size} " +
                 "materials=${model.materials.size} textures=${model.textures.size} " +
-                "uploaded=${lm.textures.size}",
+                "uploaded=${lm.textures.size} " +
+                "scene=e${scene.entityCount}/r${scene.renderableCount}",
         )
         return lm
     }
@@ -186,8 +194,13 @@ class ModelManager(
     }
 
     fun release() {
-        val lm = current ?: return
+        val lm = current
+        if (lm == null) {
+            Log.i(TAG, "release: no current model (possible zombie!)")
+            return
+        }
         current = null
+        val prims = lm.primitiveEntities.size
         for (e in lm.primitiveEntities) {
             scene.removeEntity(e)
             engine.destroyEntity(e)
@@ -209,6 +222,10 @@ class ModelManager(
         lm.meshBuffers.clear()
         lm.instances.clear()
         lm.textures.clear()
+        Log.i(
+            TAG,
+            "release: prims=$prims destroyed → scene=e${scene.entityCount}/r${scene.renderableCount}",
+        )
     }
 
     // ------------------------------------------------------------------

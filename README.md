@@ -42,6 +42,7 @@ path can be reproduced.
 | **Panel widgets + video deck: PLAY/SRC/LOOP/SEEK via gaze-click** | ✅ |
 | **IBL skybox background + lit shadow floor + dynamic shadows** | ✅ |
 | **Emissive + AO maps; sRGB/linear color-space split fixed** | ✅ |
+| **STL import + all-files model scan + scene-rebuild resilience** | ✅ |
 | Release build (debug-key signed, arm64-only ~26 MB) | ✅ |
 
 ## Requirements
@@ -331,6 +332,23 @@ right after `input swipe` did nothing).
   made every panel display the last-drawn image — the channel now clones
   pixels.
 
+### Storage & scene rebuilds
+
+* **Scoped storage hides non-media files**: `READ_EXTERNAL_STORAGE` only
+  exposes media — the walk can never see foreign `.glb`/`.stl`/video
+  pushed via adb (only the app's own MediaStore exports). The scanners
+  therefore need `MANAGE_EXTERNAL_STORAGE`; the app opens its all-files
+  toggle once at first start (grant once — or
+  `adb shell appops set <pkg> MANAGE_EXTERNAL_STORAGE allow`).
+* **First-run settings churn destroys the surface** → the render loop
+  fully stops and rebuilds (engine, scene, materials). One-shot pending
+  channels (panels, UI textures, model, video) were already consumed —
+  without re-push the scene came back EMPTY. Fixed via the renderer's
+  `onSceneReady` callback (main thread): re-set panels, re-push UI
+  textures, re-request the model, and **re-prepare** the video (a bare
+  `setSurface` after churn leaves ExoPlayer in
+  `ERROR_CODE_DECODING_FAILED`).
+
 ## Debugging tips
 
 * **Screenshots**: PowerShell `>` corrupts binary output — use
@@ -373,8 +391,9 @@ right after `input swipe` did nothing).
       arc panels excluded (unlit cards must not cast)
 - [ ] **Tonemapping/HDR**: post-processing is currently disabled for
       perf — re-enable ACES with the bloom pass for emissive/neon looks
-- [ ] **STL + OBJ import** (export exists; import would close the loop
-      with 3D-printing workflows)
+- [x] **STL import** (binary + ASCII → GltfModel adapter; the 3D-printing
+      loop closes: print → push → scan → edit → export) — **OBJ import**
+      still open
 - [ ] **Multiple simultaneous models** — `ModelManager` already loads
       one "group"; generalize to a scene list with per-object
       select/move/delete (foundation for scenes below)
