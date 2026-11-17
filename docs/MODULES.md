@@ -1,5 +1,7 @@
 # Module catalog
 
+**Languages**: [Русский](MODULES.ru.md) · [Deutsch](MODULES.de.md) · English (this file)
+
 Everything in this repository is split into Gradle modules so that a new
 feature can be added **without touching (and without being able to break)
 the modules that already work**. This file documents every module as it

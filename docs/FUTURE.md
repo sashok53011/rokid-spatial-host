@@ -1,5 +1,7 @@
 # Future directions
 
+**Languages**: [Русский](FUTURE.ru.md) · [Deutsch](FUTURE.de.md) · English (this file)
+
 Ideas for what could be built next on top of this demo. Each entry is
 marked with its **source**:
 

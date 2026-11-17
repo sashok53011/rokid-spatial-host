@@ -1,4 +1,6 @@
-# Capabilities — what this demo shows and how to see it
+# Capabilities - what this demo shows and how to see it
+
+**Languages**: [Русский](CAPABILITIES.ru.md) · [Deutsch](CAPABILITIES.de.md) · English (this file)
 
 This is the showcase inventory: every capability implemented in
 `rokid-spatial-host`, which module implements it, how to demonstrate it
@@ -8,6 +10,11 @@ capabilities.
 
 **Target**: Rokid Max (3DoF) on an Android ARM64 box, mouse + keyboard.
 Build/install/permissions: see README «Build & run».
+
+**Important (phone hosts)**: before entering glasses mode the device
+**must be switched to landscape (album) orientation** — the app does
+not rotate it automatically; in portrait the glasses mode does not come
+up correctly. Box hosts are unaffected.
 
 Quick verification of any change:
 

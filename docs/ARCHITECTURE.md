@@ -1,5 +1,7 @@
 # Architecture
 
+**Languages**: [Русский](ARCHITECTURE.ru.md) · [Deutsch](ARCHITECTURE.de.md) · English (this file)
+
 How the eight modules of `rokid-spatial-host` cooperate at runtime.
 Module-by-module API reference lives in `MODULES.md`; what the demo can
 demonstrate lives in `CAPABILITIES.md`.
