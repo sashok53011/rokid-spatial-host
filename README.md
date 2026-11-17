@@ -45,6 +45,8 @@ path can be reproduced.
 | **IBL skybox background + lit shadow floor + dynamic shadows** | ✅ |
 | **Emissive + AO maps; sRGB/linear color-space split fixed** | ✅ |
 | **STL import + all-files model scan + scene-rebuild resilience** | ✅ |
+| **CI (GitHub Actions) + 6 JVM asset-pipeline tests** | ✅ |
+| **Sandbox: multiple objects, B-clone/DEL-delete, physics stacking** | ✅ |
 | Release build (debug-key signed, arm64-only ~26 MB) | ✅ |
 
 ## Requirements
@@ -115,7 +117,9 @@ on every push/PR — JDK17 + Android SDK35 on the runner.
 | Middle click / `V` | Video sphere on/off (360° backdrop ↔ live stream) |
 | Wheel | Next video source — **scales the selected model** (×0.2…×6) |
 | `M` | Next model source (bundled demo → local files → …) |
-| `P` | Physics on/off — the model drops onto the floor as a rigid body |
+| `P` | Physics on/off — every object becomes a rigid body and they **stack** on the floor |
+| `B` | **Clone** the selected object (spawns 1 m above, becomes the new selection) |
+| `DEL` | **Delete** the selected object |
 | `E` | Export the current model as `.glb` + `.obj` into Downloads (round-trip verified) |
 | `N` | Next video source |
 | Gaze-click deck widgets | Bottom "Video" deck: PLAY/PAUSE · ‹SRC/SRC› · LOOP toggle · SEEK slider (click = seek) |
@@ -409,19 +413,23 @@ right after `input swipe` did nothing).
 - [x] **STL import** (binary + ASCII → GltfModel adapter; the 3D-printing
       loop closes: print → push → scan → edit → export) — **OBJ import**
       still open
-- [ ] **Multiple simultaneous models** — `ModelManager` already loads
-      one "group"; generalize to a scene list with per-object
-      select/move/delete (foundation for scenes below)
-- [ ] **Physics: stacked scenes** — spawn several boxes/spheres, collision
-      callbacks (log/emit events), raycast queries for gameplay
+- [x] **Multiple simultaneous models** — done: the sandbox holds a scene
+      list (`ModelObject` per object with its own id): pick nearest under
+      the crosshair, `B` clones the selection, `DEL` deletes, wheel scales
+      the selected one
+- [x] **Physics: stacked scenes** — done: every object gets its own Jolt
+      body (`bodyIds`), `P` drops them all onto the floor where they
+      stack/collide; grab-and-throw works per body. Still open: explicit
+      collision callbacks and raycast queries for gameplay
 - [x] **Panel widgets**: buttons/sliders/checkboxes rendered into panel
       textures with UV hit-testing — done: `Widgets.kt` + `PanelUiDrawer`
 - [x] **Playback controls panel** for video — done: the persistent
       `video-deck` panel (PLAY/PAUSE, SRC stepping, LOOP, click-to-seek
       via `StreamPlayer` position/duration/seek)
-- [ ] **CI**: GitHub Actions workflow (`assembleRelease` + unit tests)
-- [ ] **Parser test suite**: round-trip fuzz tests for `GltfParser` ↔
-      `GltfExporter` (pure-Kotlin module, easy to test on JVM)
+- [x] **CI**: GitHub Actions workflow (`test assembleDebug` on push/PR) —
+      done: `.github/workflows/ci.yml`, green on every push
+- [x] **Parser test suite**: round-trip tests for `GltfParser` ↔
+      `GltfExporter` + STL — done: 6 JVM tests in `core-scene`
 
 ### Medium-term (real features)
 

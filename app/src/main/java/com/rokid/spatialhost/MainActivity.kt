@@ -105,6 +105,7 @@ class MainActivity : Activity() {
      * auto-fit to ~1.1 m ([baseScale]) with a user scale multiplier.
      */
     private data class ModelObject(
+        val id: String,
         val label: String,
         val boundsMin: FloatArray,
         val boundsMax: FloatArray,
@@ -207,11 +208,20 @@ class MainActivity : Activity() {
 
     private data class ModelFile(val label: String, val path: String)
 
-    private var modelSelected = false
+    /** Sandbox state: several objects, one selected (null = none). */
+    private var selectedModelId: String? = null
+    private var nextModelId = 0
     private val sceneModels = mutableListOf<ModelObject>()
     private val localModelFiles = mutableListOf<ModelFile>()
     private var modelSourceIndex = 0 // 0 = bundled demo, 1.. = local files
     private var currentModel: com.rokid.spatialhost.scene.gltf.GltfModel? = null // D4 export
+
+    private fun newModelId() = "m${nextModelId++}"
+
+    private fun selectedModel(): ModelObject? {
+        val id = selectedModelId ?: return null
+        return sceneModels.firstOrNull { it.id == id }
+    }
 
     // ------------------------------------------------------------------
     // D3: rigid-body physics (Jolt). While active the physics body drives
@@ -229,31 +239,42 @@ class MainActivity : Activity() {
      * D3b: press while the crosshair is on the model during simulation →
      * engage the grab spring at the hit point.
      */
-    private fun tryGrabAtCrosshair(): Boolean {
-        val obj = sceneModels.firstOrNull() ?: return false
+    /** Nearest object hit by the crosshair, or null (shared by pick/grab). */
+    private fun pickModelAtCrosshair(): Pair<ModelObject, Float>? {
         val f = rotateVec(currentCameraQuat(), 0f, 0f, -1f)
-        val localOrigin = obj.worldToLocal(floatArrayOf(0f, 0f, 0f))
-        val localDir = obj.worldDirToLocal(f)
-        val t = com.rokid.spatialhost.scene.hitBox(
-            localOrigin, localDir, obj.boundsMin, obj.boundsMax,
-        )
-        if (t == null) {
-            Log.i(
-                TAG,
-                "grab miss: lookPitch=${"%.3f".format(lookPitch)} " +
-                    "fwd=${f.joinToString(",") { "%.2f".format(it) }} " +
-                    "objPos=${obj.pos.joinToString(",") { "%.2f".format(it) }} " +
-                    "yaw=${"%.2f".format(obj.yawRad)} pitch=${"%.2f".format(obj.pitchRad)}",
-            )
+        var best: ModelObject? = null
+        var bestT = Float.MAX_VALUE
+        for (obj in sceneModels) {
+            val localOrigin = obj.worldToLocal(floatArrayOf(0f, 0f, 0f))
+            val localDir = obj.worldDirToLocal(f)
+            val t = com.rokid.spatialhost.scene.hitBox(
+                localOrigin, localDir, obj.boundsMin, obj.boundsMax,
+            ) ?: continue
+            if (t < bestT) {
+                bestT = t
+                best = obj
+            }
+        }
+        return best?.let { it to bestT }
+    }
+
+    private fun tryGrabAtCrosshair(): Boolean {
+        val f = rotateVec(currentCameraQuat(), 0f, 0f, -1f)
+        val hit = pickModelAtCrosshair()
+        if (hit == null) {
+            Log.i(TAG, "grab miss (crosshair off all ${sceneModels.size} objects)")
             return false
         }
+        val (obj, t) = hit
+        selectedModelId = obj.id
         grabbing = true
         grabDistance = t
         grabOffX = 0f
         grabOffY = 0f
+        physics.grab(obj.id)
         // The eye sits at the world origin, so the grab point is dir × t.
         physics.dragTo(f[0] * t, f[1] * t, f[2] * t)
-        Log.i(TAG, "grab ${obj.label} at ${"%.2f".format(t)} m")
+        Log.i(TAG, "grab ${obj.label}#${obj.id} at ${"%.2f".format(t)} m")
         return true
     }
 
@@ -283,14 +304,13 @@ class MainActivity : Activity() {
             if (!physicsActive) return
             try {
                 physics.step(FIXED_PHYSICS_DT)
-                val obj = sceneModels.firstOrNull()
-                val pos = physics.modelPosition()
-                val rot = physics.modelRotation()
-                if (obj != null && pos != null && rot != null) {
+                for (obj in sceneModels) {
+                    val pos = physics.bodyPosition(obj.id) ?: continue
+                    val rot = physics.bodyRotation(obj.id) ?: continue
                     obj.pos[0] = pos[0]
                     obj.pos[1] = pos[1]
                     obj.pos[2] = pos[2]
-                    renderer.setModelTransform(obj.matrixWith(pos, rot))
+                    renderer.setModelTransform(obj.id, obj.matrixWith(pos, rot))
                 }
             } catch (t: Throwable) {
                 Log.e(TAG, "physics tick failed — physics OFF", t)
@@ -301,47 +321,56 @@ class MainActivity : Activity() {
         }
     }
 
-    /** P: the model becomes a dynamic body and drops onto the floor. */
+    /** P: every object becomes a dynamic body and drops onto the floor. */
     private fun togglePhysics() {
         if (physicsActive) {
             physicsActive = false
             grabbing = false
             physics.releaseGrab()
             mainHandler.removeCallbacks(physicsTick)
-            // Keep the model where it landed.
-            val obj = sceneModels.firstOrNull()
-            val pos = physics.modelPosition()
-            val rot = physics.modelRotation()
-            if (obj != null && pos != null && rot != null) {
+            // Keep the objects where they landed.
+            for (obj in sceneModels) {
+                val pos = physics.bodyPosition(obj.id) ?: continue
+                val rot = physics.bodyRotation(obj.id) ?: continue
                 obj.pos[0] = pos[0]
                 obj.pos[1] = pos[1]
                 obj.pos[2] = pos[2]
                 val e = com.rokid.spatialhost.bridge.Quat.toEulerYXZ(rot)
                 obj.yawRad = e[0]
                 obj.pitchRad = e[1]
-                renderer.setModelTransform(obj.matrix())
+                renderer.setModelTransform(obj.id, obj.matrix())
             }
-            physics.removeModel()
-            Log.i(TAG, "physics OFF — model kept at ${pos?.joinToString { "%.2f".format(it) }}")
+            physics.removeAllBodies()
+            Log.i(TAG, "physics OFF — ${sceneModels.size} objects kept")
         } else {
-            val obj = sceneModels.firstOrNull()
-            if (obj == null) {
+            if (sceneModels.isEmpty()) {
                 Log.i(TAG, "physics: no model loaded")
                 return
             }
             if (!physics.ensureInit()) return
-            physics.addFloor(FLOOR_TOP_Y, obj.pos[0], obj.pos[2])
-            val s = obj.baseScale * obj.userScale
-            physics.addModelBox(
-                obj.pos[0], obj.pos[1], obj.pos[2],
-                (obj.boundsMax[0] - obj.boundsMin[0]) / 2f * s,
-                (obj.boundsMax[1] - obj.boundsMin[1]) / 2f * s,
-                (obj.boundsMax[2] - obj.boundsMin[2]) / 2f * s,
-            )
+            for (obj in sceneModels) {
+                physics.addFloor(FLOOR_TOP_Y, obj.pos[0], obj.pos[2])
+                addPhysicsBoxFor(obj)
+            }
             physicsActive = true
             mainHandler.post(physicsTick)
-            Log.i(TAG, "physics ON — drop from y=${"%.2f".format(obj.pos[1])} to floor $FLOOR_TOP_Y")
+            Log.i(
+                TAG,
+                "physics ON — ${sceneModels.size} bodies drop to floor $FLOOR_TOP_Y",
+            )
         }
+    }
+
+    /** Jolt box for one object (AABB × baseScale × userScale). */
+    private fun addPhysicsBoxFor(obj: ModelObject): Boolean {
+        val s = obj.baseScale * obj.userScale
+        return physics.addModelBox(
+            obj.id,
+            obj.pos[0], obj.pos[1], obj.pos[2],
+            (obj.boundsMax[0] - obj.boundsMin[0]) / 2f * s,
+            (obj.boundsMax[1] - obj.boundsMin[1]) / 2f * s,
+            (obj.boundsMax[2] - obj.boundsMin[2]) / 2f * s,
+        )
     }
 
     /** Camera orientation = head pose ⊗ manual look offset. */
@@ -580,16 +609,27 @@ class MainActivity : Activity() {
                         "bounds=${model.boundsMin.joinToString("/") { "%.2f".format(it) }}.." +
                         "${model.boundsMax.joinToString("/") { "%.2f".format(it) }}",
                 )
+                // Loading a new source replaces the whole sandbox: drop the
+                // old objects (renderer entities + physics bodies) first.
+                for (old in sceneModels) {
+                    renderer.requestRemoveModel(old.id)
+                    physics.removeBody(old.id)
+                }
+                sceneModels.clear()
                 val obj = ModelObject(
+                    id = newModelId(),
                     label = label,
                     boundsMin = model.boundsMin,
                     boundsMax = model.boundsMax,
                 )
-                sceneModels.clear()
                 sceneModels.add(obj)
-                modelSelected = false
+                selectedModelId = null
                 currentModel = model
-                renderer.requestModel(model, obj.matrix())
+                renderer.requestModel(obj.id, model, obj.matrix())
+                // Source switched mid-simulation: the new object needs a
+                // body too, or it would hang static while P is on.
+                if (physicsActive) addPhysicsBoxFor(obj)
+                Log.i(TAG, "scene: objects=${sceneModels.size} source=$label")
             } catch (t: Throwable) {
                 Log.e(TAG, "model load failed ($label)", t)
             }
@@ -600,7 +640,7 @@ class MainActivity : Activity() {
     private fun nextModelSource() {
         val count = 1 + localModelFiles.size
         modelSourceIndex = (modelSourceIndex + 1) % count
-        modelSelected = false
+        selectedModelId = null
         val name = if (modelSourceIndex == 0) "demo:DamagedHelmet"
         else localModelFiles[modelSourceIndex - 1].label
         Log.i(TAG, "model source → $name")
@@ -868,12 +908,12 @@ class MainActivity : Activity() {
 
                 MotionEvent.ACTION_SCROLL -> {
                     val wheel = ev.getAxisValue(MotionEvent.AXIS_VSCROLL)
-                    val obj = if (modelSelected && !physicsActive) sceneModels.firstOrNull() else null
+                    val obj = selectedModel()?.takeIf { !physicsActive }
                     if (obj != null && wheel != 0f) {
                         // Selected model: wheel scales it (else wheel = next video).
                         val step = if (wheel > 0f) 1.12f else 1f / 1.12f
                         obj.userScale = (obj.userScale * step).coerceIn(0.2f, 6f)
-                        renderer.setModelTransform(obj.matrix())
+                        renderer.setModelTransform(obj.id, obj.matrix())
                     } else if (wheel > 0.5f) {
                         nextVideoSource()
                     }
@@ -890,14 +930,14 @@ class MainActivity : Activity() {
                         // Held model follows crosshair + mouse offset (throw).
                         dragGrabbedModel(dx, dy)
                     } else if (moved) {
-                        val obj = if (modelSelected && !physicsActive) sceneModels.firstOrNull() else null
+                        val obj = selectedModel()?.takeIf { !physicsActive }
                         if (obj != null) {
                             // Drag rotates the selected model (grab-the-surface
                             // feel) instead of steering the view.
                             obj.yawRad += dx * 0.005f
                             obj.pitchRad = (obj.pitchRad + dy * 0.005f)
                                 .coerceIn(-1.4f, 1.4f)
-                            renderer.setModelTransform(obj.matrix())
+                            renderer.setModelTransform(obj.id, obj.matrix())
                         } else {
                             val emu = activeBridge as? EmulatorBridge
                             if (emu != null) {
@@ -968,9 +1008,65 @@ class MainActivity : Activity() {
                 exportCurrentModel()
                 return true
             }
+
+            KeyEvent.KEYCODE_B -> {
+                spawnClone()
+                return true
+            }
+
+            KeyEvent.KEYCODE_DEL -> {
+                deleteSelected()
+                return true
+            }
         }
         handleGesture(recognizer.onEvent(InputEvent.Key(keyCode)))
         return super.onKeyDown(keyCode, event)
+    }
+
+    // ------------------------------------------------------------------
+    // Sandbox: B = clone selected object, DEL = delete it
+    // ------------------------------------------------------------------
+
+    /** B: spawn a copy of the selected (or first) object one meter above. */
+    private fun spawnClone() {
+        val model = currentModel
+        val src = selectedModel() ?: sceneModels.firstOrNull()
+        if (model == null || src == null) {
+            Log.i(TAG, "clone: nothing to copy")
+            return
+        }
+        val obj = ModelObject(
+            id = newModelId(),
+            label = src.label,
+            boundsMin = src.boundsMin,
+            boundsMax = src.boundsMax,
+            pos = floatArrayOf(src.pos[0], src.pos[1] + 1.1f, src.pos[2]),
+            yawRad = src.yawRad,
+            pitchRad = src.pitchRad,
+            userScale = src.userScale,
+        )
+        sceneModels.add(obj)
+        selectedModelId = obj.id
+        renderer.requestModel(obj.id, model, obj.matrix())
+        if (physicsActive) {
+            physics.addFloor(FLOOR_TOP_Y, obj.pos[0], obj.pos[2])
+            addPhysicsBoxFor(obj)
+        }
+        Log.i(TAG, "cloned ${src.label}#${obj.id} → objects=${sceneModels.size}")
+    }
+
+    /** DEL: remove the selected object from scene + physics. */
+    private fun deleteSelected() {
+        val obj = selectedModel()
+        if (obj == null) {
+            Log.i(TAG, "delete: nothing selected")
+            return
+        }
+        sceneModels.remove(obj)
+        selectedModelId = null
+        renderer.requestRemoveModel(obj.id)
+        physics.removeBody(obj.id)
+        Log.i(TAG, "deleted ${obj.label}#${obj.id} → objects=${sceneModels.size}")
     }
 
     // ------------------------------------------------------------------
@@ -1133,9 +1229,10 @@ class MainActivity : Activity() {
         renderer.setPanels(panelSpecs())
         pushAllPanelUi()
         val model = currentModel
-        val obj = sceneModels.firstOrNull()
-        if (model != null && obj != null) {
-            renderer.requestModel(model, obj.matrix())
+        if (model != null) {
+            for (obj in sceneModels) {
+                renderer.requestModel(obj.id, model, obj.matrix())
+            }
         }
         if (videoActive) {
             // Fresh prepare on the new surface: a bare setSurface after the
@@ -1150,7 +1247,8 @@ class MainActivity : Activity() {
         }
         Log.i(
             TAG,
-            "scene content re-applied (model=${obj?.label ?: "-"}, video=$videoActive)",
+            "scene content re-applied " +
+                "(objects=${sceneModels.size}, video=$videoActive)",
         )
     }
 
@@ -1233,24 +1331,17 @@ class MainActivity : Activity() {
 
     /** 3DoF ray from current head pose → model first, then panel under crosshair. */
     private fun selectAtCrosshair() {
-        val q = currentCameraQuat()
-        val f = rotateVec(q, 0f, 0f, -1f)
+        val f = rotateVec(currentCameraQuat(), 0f, 0f, -1f)
 
-        // Model pick: camera-space ray → model-local space, slab test vs AABB.
-        val obj = sceneModels.firstOrNull()
-        if (obj != null) {
-            val localOrigin = obj.worldToLocal(floatArrayOf(0f, 0f, 0f)) // eye at world origin
-            val localDir = obj.worldDirToLocal(f)
-            val t = com.rokid.spatialhost.scene.hitBox(
-                localOrigin, localDir, obj.boundsMin, obj.boundsMax,
-            )
-            if (t != null) {
-                modelSelected = true
-                Log.i(TAG, "selected model ${obj.label} (t=${"%.2f".format(t)})")
-                return
-            }
+        // Model pick: nearest object hit by the crosshair wins.
+        val modelHit = pickModelAtCrosshair()
+        if (modelHit != null) {
+            val (obj, t) = modelHit
+            selectedModelId = obj.id
+            Log.i(TAG, "selected model ${obj.label}#${obj.id} (t=${"%.2f".format(t)})")
+            return
         }
-        modelSelected = false
+        selectedModelId = null
 
         val dir = com.rokid.spatialhost.scene.Vec3(f[0], f[1], f[2])
         val hit = layoutEngine.hitTest(dir)
@@ -1338,18 +1429,22 @@ class MainActivity : Activity() {
             append("panels : ${layoutEngine.panels.size} · focus=${navState.focusedPanelId ?: "-"} · sel=${navState.selectedPanelId ?: "-"}\n")
             val m = sceneModels.firstOrNull()
             if (m != null) {
+                val sel = selectedModelId?.let { "#$it" } ?: "idle"
                 append(
-                    "model  : ${m.label} · ${if (modelSelected) "SELECTED" else "idle"} " +
-                        "· ×${"%.2f".format(m.userScale)} · yaw ${Math.toDegrees(m.yawRad.toDouble()).toInt()}° " +
-                        "(tap=pick drag=rotate wheel=scale M=switch)\n",
+                    "model  : ${m.label} ×${sceneModels.size} · sel=$sel " +
+                        "· ×${"%.2f".format((selectedModel() ?: m).userScale)} · " +
+                        "yaw ${Math.toDegrees((selectedModel() ?: m).yawRad.toDouble()).toInt()}° " +
+                        "(tap=pick drag=rotate wheel=scale B=clone DEL=delete M=switch)\n",
                 )
             } else {
                 append("model  : loading…\n")
             }
             if (physicsActive || physics.isInitialized) {
-                val p = physics.modelPosition()
+                val obj = selectedModel() ?: m
+                val p = obj?.let { physics.bodyPosition(it.id) }
                 append(
                     "physics: ${if (physicsActive) "ON" else "OFF"}" +
+                        " · bodies=${physics.bodyCount}" +
                         (if (grabbing) " · GRABBED" else "") +
                         (p?.let { " · y=${"%.2f".format(it[1])}" } ?: "") +
                         " · floor $FLOOR_TOP_Y m (P=toggle)\n",

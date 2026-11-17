@@ -38,26 +38,35 @@ class ModelManager(
     private val litMaterial: Material?,
 ) {
 
-    class LoadedModel(val groupEntity: Int, val groupTransform: Int) {
+    class LoadedModel(val id: String, val groupEntity: Int, val groupTransform: Int) {
         val primitiveEntities = mutableListOf<Int>()
         val nodeEntities = mutableMapOf<Int, Int>()
         val meshBuffers = mutableListOf<Pair<VertexBuffer, IndexBuffer>>()
         val instances = mutableListOf<MaterialInstance>()
-        val textures = mutableListOf<Texture>()
         var matrix: FloatArray = IDENT
     }
 
-    var current: LoadedModel? = null
-        private set
+    /** Live scene objects by id (the sandbox holds several). */
+    val models = LinkedHashMap<String, LoadedModel>()
 
-    /** Build GPU resources for [model]; replaces any previous model. */
-    fun load(model: GltfModel, matrix: FloatArray): LoadedModel? {
+    /**
+     * GPU resources shared per [GltfModel]: clones of the same parsed
+     * model bind ONE set of textures (decoding5×2048 maps per spawn would
+     * hitch the render thread for ~1 s each). Freed by [shutdown].
+     */
+    private val modelTexCache = HashMap<GltfModel, HashMap<Int, Pair<Texture, TextureSampler>>>()
+    private var fallbackWhite: Pair<Texture, TextureSampler>? = null
+    private var fallbackBlack: Pair<Texture, TextureSampler>? = null
+    private var fallbackFlat: Pair<Texture, TextureSampler>? = null
+
+    /** Build GPU resources for [model] under [id]; replaces that id only. */
+    fun load(id: String, model: GltfModel, matrix: FloatArray): LoadedModel? {
         val lit = litMaterial
         if (lit == null) {
             Log.e(TAG, "load skipped — lit material unavailable")
             return null
         }
-        release()
+        release(id)
 
         val tm = engine.transformManager
         val groupEntity = EntityManager.get().create()
@@ -65,19 +74,16 @@ class ModelManager(
         scene.addEntity(groupEntity)
         tm.setTransform(groupTf, matrix)
 
-        val lm = LoadedModel(groupEntity, groupTf)
+        val lm = LoadedModel(id, groupEntity, groupTf)
         lm.matrix = matrix
 
-        // Textures are decoded once per image and shared across primitives.
-        // Cache key distinguishes color-space usage: the same image may be
-        // sampled as sRGB (baseColor/emissive) or linear (normal/MR/AO).
-        val texCache = mutableMapOf<Int, Pair<Texture, TextureSampler>>()
-        val white = buildSolidTexture() // baseColor / mrMap / aoMap fallback
-        val black = buildSolidTexture(0, 0, 0) // emissiveMap fallback (no glow)
-        val flatNormal = buildFlatNormalTexture() // normalMap fallback (0,0,1)
-        lm.textures.add(white.first)
-        lm.textures.add(black.first)
-        lm.textures.add(flatNormal.first)
+        // Textures: decoded once per GltfModel, shared across all its
+        // instances/clones. Cache key distinguishes color-space usage (the
+        // same image may be sampled as sRGB or linear).
+        val texCache = modelTexCache.getOrPut(model) { HashMap() }
+        val white = fallbackWhite ?: buildSolidTexture().also { fallbackWhite = it }
+        val black = fallbackBlack ?: buildSolidTexture(0, 0, 0).also { fallbackBlack = it }
+        val flatNormal = fallbackFlat ?: buildFlatNormalTexture().also { fallbackFlat = it }
 
         fun textureFor(
             texIdx: Int?,
@@ -88,7 +94,6 @@ class ModelManager(
             val key = if (srgb) texIdx else -(texIdx + 1)
             texCache[key]?.let { return it }
             val built = decodeTexture(model.textures[texIdx], srgb) ?: return default
-            lm.textures.add(built.first)
             texCache[key] = built
             return built
         }
@@ -167,7 +172,7 @@ class ModelManager(
 
         for (root in model.sceneRootNodes) walk(root, groupTf)
 
-        current = lm
+        models[id] = lm
         model.primitives.values.firstOrNull()?.firstOrNull()?.let { p ->
             Log.i(
                 TAG,
@@ -177,30 +182,25 @@ class ModelManager(
         }
         Log.i(
             TAG,
-            "model loaded: nodes=${model.nodes.size} prims=${model.primitiveCount} " +
+            "model[$id] loaded: nodes=${model.nodes.size} prims=${model.primitiveCount} " +
                 "renderables=${lm.primitiveEntities.size} " +
                 "materials=${model.materials.size} textures=${model.textures.size} " +
-                "uploaded=${lm.textures.size} " +
-                "scene=e${scene.entityCount}/r${scene.renderableCount}",
+                "scene=e${scene.entityCount}/r${scene.renderableCount} " +
+                "objects=${models.size}",
         )
         return lm
     }
 
-    /** Apply placement (render-thread only). */
-    fun setMatrix(matrix: FloatArray) {
-        val lm = current ?: return
+    /** Apply placement of one object (render-thread only). */
+    fun setMatrix(id: String, matrix: FloatArray) {
+        val lm = models[id] ?: return
         lm.matrix = matrix
         engine.transformManager.setTransform(lm.groupTransform, matrix)
     }
 
-    fun release() {
-        val lm = current
-        if (lm == null) {
-            Log.i(TAG, "release: no current model (possible zombie!)")
-            return
-        }
-        current = null
-        val prims = lm.primitiveEntities.size
+    /** Remove one object's entities (textures are shared — see [shutdown]). */
+    fun release(id: String) {
+        val lm = models.remove(id) ?: return
         for (e in lm.primitiveEntities) {
             scene.removeEntity(e)
             engine.destroyEntity(e)
@@ -214,18 +214,28 @@ class ModelManager(
             engine.destroyIndexBuffer(ib)
         }
         for (i in lm.instances) engine.destroyMaterialInstance(i)
-        for (t in lm.textures) engine.destroyTexture(t)
         scene.removeEntity(lm.groupEntity)
         engine.destroyEntity(lm.groupEntity)
-        lm.primitiveEntities.clear()
-        lm.nodeEntities.clear()
-        lm.meshBuffers.clear()
-        lm.instances.clear()
-        lm.textures.clear()
-        Log.i(
-            TAG,
-            "release: prims=$prims destroyed → scene=e${scene.entityCount}/r${scene.renderableCount}",
-        )
+        Log.i(TAG, "model[$id] released → objects=${models.size}")
+    }
+
+    fun releaseAll() {
+        models.keys.toList().forEach { release(it) }
+    }
+
+    /** Scene teardown: all objects + shared textures. */
+    fun shutdown() {
+        releaseAll()
+        fallbackWhite?.first?.let { engine.destroyTexture(it) }
+        fallbackBlack?.first?.let { engine.destroyTexture(it) }
+        fallbackFlat?.first?.let { engine.destroyTexture(it) }
+        fallbackWhite = null
+        fallbackBlack = null
+        fallbackFlat = null
+        for (perModel in modelTexCache.values) {
+            for ((_, pair) in perModel) engine.destroyTexture(pair.first)
+        }
+        modelTexCache.clear()
     }
 
     // ------------------------------------------------------------------

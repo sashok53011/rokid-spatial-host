@@ -46,6 +46,8 @@ der Pfad ist also reproduzierbar.
 | **IBL-Skybox-Hintergrund + beleuchteter Schattenboden + dynamische Schatten** | ✅ |
 | **Emissive- + AO-Maps; sRGB/Linear-Farbraum-Split gefixt** | ✅ |
 | **STL-Import + All-Files-Modell-Scan + Szenen-Rebuild-Resilienz** | ✅ |
+| **CI (GitHub Actions) + 6 JVM-Tests der Asset-Pipeline** | ✅ |
+| **Sandbox: mehrere Objekte, B-Clone/DEL-Delete, Physik-Stapel** | ✅ |
 | Release-Build (mit Debug-Key signiert, arm64-only ~26 MB) | ✅ |
 
 ## Voraussetzungen
@@ -116,7 +118,9 @@ GitHub Actions (`.github/workflows/ci.yml`) führt bei jedem Push/PR
 | Mittelklick / `V` | Video-Sphäre an/aus (360°-Hintergrund ↔ Live-Stream) |
 | Rad | Nächste Videoquelle — **skaliert das ausgewählte Modell** (×0,2…×6) |
 | `M` | Nächstes Modell (Demo → lokale Dateien → …) |
-| `P` | Physik an/aus — das Modell fällt als Starrkörper auf den Boden |
+| `P` | Physik an/aus — jedes Objekt wird Starrkörper und sie **stapeln** sich auf dem Boden |
+| `B` | **Klon** des selektierten Objekts (spawnt 1 m darüber, wird neu selektiert) |
+| `DEL` | Selektiertes Objekt **löschen** |
 | `E` | Aktuelles Modell als `.glb` + `.obj` nach Downloads exportieren (Round-Trip verifiziert) |
 | `N` | Nächste Videoquelle |
 | Deck-Widgets anblicken & klicken | Untere „Video"-Platte: PLAY/PAUSE · ‹SRC/SRC› · LOOP-Schalter · SEEK-Slider (Klick = Spule) |
@@ -429,11 +433,14 @@ nächsten echten Klick** (Symptom: zweimal klicken; in adb-Skripten tat
 - [x] **STL-Import** (binär + ASCII → GltfModel-Adapter; der
       3D-Druck-Kreis schließt: drücken → push → scan → editieren →
       export) — **OBJ-Import** offen
-- [ ] **Mehrere Modelle gleichzeitig** — `ModelManager` lädt schon eine
-      „Gruppe"; auf eine Szenenliste erweitern mit per-Object
-      select/move/delete (Fundament für die Szenen unten)
-- [ ] **Physik: Stapel-Szenen** — mehrere Kugeln/Kästen spawnen,
-      Kollisions-Callbacks (Logs/Events), Raycast-Abfragen für Gameplay
+- [x] **Mehrere Modelle gleichzeitig** — fertig: die Sandbox hält eine
+      Szenenliste (ein `ModelObject` pro Objekt mit eigener id): Auswahl
+      des nächsten unter dem Fadenkreuz, `B` kloniert die Selektion,
+      `DEL` löscht, Wheel skaliert das selektierte
+- [x] **Physik: Stapel-Szenen** — fertig: jedes Objekt bekommt eigenen
+      Jolt-Body (`bodyIds`), `P` lässt sie alle auf den Boden fallen, wo
+      sie sich stapeln/kollidieren; Grab-and-Throw pro Body. Offen:
+      explizite Kollisions-Callbacks und Raycast-Abfragen für Gameplay
 - [x] **Panel-Widgets**: Buttons/Sliders/Checkboxen, in Panel-Texturen
       gerendert mit UV-Hit-Testing — fertig: `Widgets.kt` +
       `PanelUiDrawer`
@@ -441,9 +448,10 @@ nächsten echten Klick** (Symptom: zweimal klicken; in adb-Skripten tat
       fertig: die persistente `video-deck`-Platte (PLAY/PAUSE,
       SRC-Schritt, LOOP, Spulen per Klick über Position/Dauer von
       `StreamPlayer`)
-- [ ] **CI**: GitHub-Actions-Workflow (`assembleRelease` + Unit-Tests)
-- [ ] **Parser-Testsuite**: Round-Trip-Fuzz-Tests `GltfParser` ↔
-      `GltfExporter` (reines Kotlin-Moduell, leicht auf der JVM)
+- [x] **CI**: GitHub-Actions-Workflow (`test assembleDebug` bei jedem
+      Push/PR) — fertig: `.github/workflows/ci.yml`, grün
+- [x] **Parser-Testsuite**: Round-Trip-Tests `GltfParser` ↔
+      `GltfExporter` + STL — fertig: 6 JVM-Tests in `core-scene`
 
 ### Mittelfristig (echte Features)
 

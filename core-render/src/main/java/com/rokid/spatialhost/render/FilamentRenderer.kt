@@ -138,19 +138,32 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
     }
 
     /** Load a parsed glTF model (D1) with its placement matrix. */
-    @Volatile
-    private var pendingModel: Pair<GltfModel, FloatArray>? = null
-
-    fun requestModel(model: GltfModel, matrix: FloatArray) {
-        pendingModel = model to matrix
+    sealed interface ModelOp {
+        class Load(val id: String, val model: GltfModel, val matrix: FloatArray) : ModelOp
+        class Transform(val id: String, val matrix: FloatArray) : ModelOp
+        class Remove(val id: String) : ModelOp
     }
 
-    /** Update the loaded model's placement (position/rotation/scale). */
     @Volatile
-    private var pendingModelTransform: FloatArray? = null
+    private var pendingModelOps: List<ModelOp>? = null
 
-    fun setModelTransform(matrix: FloatArray) {
-        pendingModelTransform = matrix
+    private fun postModelOp(op: ModelOp) {
+        pendingModelOps = (pendingModelOps ?: emptyList()) + op
+    }
+
+    /** Queue loading [model] as object [id] (replaces that id only). */
+    fun requestModel(id: String, model: GltfModel, matrix: FloatArray) {
+        postModelOp(ModelOp.Load(id, model, matrix))
+    }
+
+    /** Queue a placement update for one object. */
+    fun setModelTransform(id: String, matrix: FloatArray) {
+        postModelOp(ModelOp.Transform(id, matrix))
+    }
+
+    /** Queue removal of one object. */
+    fun requestRemoveModel(id: String) {
+        postModelOp(ModelOp.Remove(id))
     }
 
     private var thread: Thread? = null
@@ -402,14 +415,19 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
                 applyPendingPanelUi()
                 applyFocus()
 
-                // glTF model (D1)
-                pendingModel?.let { (model, matrix) ->
-                    pendingModel = null
-                    sceneState?.modelManager?.load(model, matrix)
-                }
-                pendingModelTransform?.let { m ->
-                    pendingModelTransform = null
-                    sceneState?.modelManager?.setMatrix(m)
+                // Scene models: queued loads/transforms/removes, in order
+                pendingModelOps?.let { ops ->
+                    pendingModelOps = null
+                    val mm = sceneState?.modelManager
+                    if (mm != null) {
+                        for (op in ops) {
+                            when (op) {
+                                is ModelOp.Load -> mm.load(op.id, op.model, op.matrix)
+                                is ModelOp.Transform -> mm.setMatrix(op.id, op.matrix)
+                                is ModelOp.Remove -> mm.release(op.id)
+                            }
+                        }
+                    }
                 }
 
                 // Video/color sphere requests (color FIRST so a rapid
@@ -860,7 +878,7 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
 
     private fun destroySceneState(st: SceneState) {
         val e = st.engine
-        st.modelManager.release()
+        st.modelManager.shutdown()
         st.ibl.release()
         for (entity in st.panelEntities.values) {
             st.scene.removeEntity(entity)
