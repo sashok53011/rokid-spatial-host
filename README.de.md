@@ -390,6 +390,27 @@ nächsten echten Klick** (Symptom: zweimal klicken; in adb-Skripten tat
   Video **neu preparieren** (ein blankes `setSurface` nach dem Churn
   lässt ExoPlayer in `ERROR_CODE_DECODING_FAILED`).
 
+### Skinning (GPU-Knochen)
+
+* **Vertex-Buffer-Größen müssen EXAKT sein**: Filament validiert
+  `ByteBuffer.remaining()` gegen `vertexCount × attributeSize` und bricht
+  den Draw bei Abweichung still ab (gleiche Falle wie bei Index-Buffern —
+  „das unsichtbare Modell"). JOINTS_0 als `USHORT4` braucht **8 Bytes pro
+  Vertex** (`allocateDirect(vertexCount * 8)`); eine
+  `alloc(vertexCount*4)`-Allokation (16 B/Vertex, „wie Floats") erzeugte
+  den klassischen *Fächer aus Dreiecken* statt der Figur. Symptom → zuerst
+  die Buffer-Arithmetik prüfen.
+* **IBM mancher Exporter sind Armature-relativ** (CesiumMan:
+  `jw·IBM = I` nur mit Armature als Wurzel, nicht Scene-Root) — harmlos
+  für `bone = inverse(meshWorld)·jointWorld·IBM` (gemeinsames Präfix
+  kürzt sich), aber die Bind-Posen nicht per `jw·IBM == I` am Scene-Root
+  „verifizieren" — das liefert ein falsches Negativ.
+* **Folgende Diagnose-Reihenfolge hat funktioniert**: (1) JVM-Asserts
+  (Σw==1, Indexbereiche, Knochentranslationen gegen das Device-Log —
+  müssen bit-identisch sein), (2) Skinning AUS + 3-Slot-VB → beweist die
+  Geometrie, (3) Identity-Knochen → trennt Vertex-Attribute von
+  Knochenwerten, (4) echte Knochen.
+
 ## Debugging-Tipps
 
 * **Screenshots**: PowerShell `>` zerstört Binärdaten —

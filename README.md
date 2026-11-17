@@ -372,6 +372,25 @@ right after `input swipe` did nothing).
   `setSurface` after churn leaves ExoPlayer in
   `ERROR_CODE_DECODING_FAILED`).
 
+### Skinning (GPU bones)
+
+* **Vertex-buffer sizes must be EXACT**: Filament validates
+  `ByteBuffer.remaining()` against `vertexCount × attributeSize` and
+  silently breaks the draw on mismatch (same trap as index buffers —
+  "the invisible-model bug"). JOINTS_0 as `USHORT4` needs **8 bytes per
+  vertex** (`allocateDirect(vertexCount * 8)`); an `alloc(vertexCount*4)`
+  (16 B/vertex, sized "like floats") produced the classic *fan of
+  triangles* instead of the character. Symptom → check buffer math first.
+* **IBM are Armature-relative in some exporters** (CesiumMan:
+  `jointWorld·IBM = I` only with the Armature as root, not the scene
+  root) — harmless for `bone = inverse(meshWorld)·jointWorld·IBM` because
+  the shared prefix cancels, but don't "verify" bind pose by testing
+  `jw·IBM == I` at scene root — you'll get a false negative.
+* **Diagnosis order that worked**: (1) JVM-side asserts (Σw==1, index
+  ranges, bone translations vs device log — must match bit-for-bit),
+  (2) skinning OFF + 3-slot VB → proves geometry, (3) identity bones →
+  isolates vertex attributes from bone values, (4) real bones.
+
 ## Debugging tips
 
 * **Screenshots**: PowerShell `>` corrupts binary output — use

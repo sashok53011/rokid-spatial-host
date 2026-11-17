@@ -140,6 +140,9 @@ class ModelManager(
             // The skin's joint count drives Builder.skinning() per primitive
             // (each primitive gets its own renderable in this loader).
             val skin = node.skin?.let { model.skins.getOrNull(it) }
+            if (node.skin != null && skin == null) {
+                Log.w(TAG, "node[$nodeIdx] skin=${node.skin} not found (skins=${model.skins.size})")
+            }
 
             model.primitives[node.mesh]?.forEach { prim ->
                 val matDef = prim.material?.let { model.materials.getOrNull(it) }
@@ -152,6 +155,13 @@ class ModelManager(
                     primJoints.size == prim.positions.size / 3 * 4 &&
                     primWeights.size == primJoints.size &&
                     skin.jointCount in 1..255
+                if (node.skin != null && !skinnedPrim) {
+                    Log.w(
+                        TAG,
+                        "skin skipped: joints=${primJoints?.size} weights=${primWeights?.size} " +
+                            "verts=${prim.positions.size / 3} jointCount=${skin?.jointCount}",
+                    )
+                }
 
                 // Per-primitive instance: tint × maps, PBR factors.
                 val instance = lit.createInstance()
@@ -205,6 +215,12 @@ class ModelManager(
                     // BONE_WEIGHTS slots were added to the vertex buffer).
                     rb.skinning(skin.jointCount)
                     lm.skinned.add(SkinnedBinding(entity, nodeIdx, skin))
+                    val withTf = skin.joints.count { it in lm.nodeTransforms }
+                    Log.i(
+                        TAG,
+                        "skin[$nodeIdx]: joints=${skin.jointCount} " +
+                            "withTransform=$withTf meshNodeTf=${nodeTf >= 0}",
+                    )
                 }
                 rb.build(engine, entity)
                 // GlTF node hierarchy: primitive under its node entity, which
@@ -297,12 +313,16 @@ class ModelManager(
         for (lm in models.values) {
             if (lm.skinned.isEmpty()) continue
             for (b in lm.skinned) {
-                val meshTf = lm.nodeTransforms[b.meshNode] ?: continue
+                val meshTf = lm.nodeTransforms[b.meshNode]
+                if (meshTf == null) {
+                    Log.w(TAG, "skin bind: mesh node ${b.meshNode} has no transform")
+                    continue
+                }
                 val ri = rm.getInstance(b.renderableEntity)
                 if (ri == 0) continue
+                val skin = b.skin
                 val meshWorld = tm.getWorldTransform(meshTf, scratchMesh)
                 val invMesh = Mat4.inverse(meshWorld) ?: continue
-                val skin = b.skin
                 val ibm = skin.inverseBindMatrices
                 var ibmOff = 0
                 b.packed.rewind()
@@ -493,15 +513,20 @@ class ModelManager(
 
         // Skin slots (D6): JOINTS_0 → BONE_INDICES (u16×4, not normalized),
         // WEIGHTS_0 → BONE_WEIGHTS (float×4). Matches gltfio's mapping.
+        // EXACT sizes: Filament validates buffer remaining() against
+        // vertexCount * attributeSize (see buildIndexBuffer note) — an
+        // oversized buffer silently breaks the draw.
         var boneIndices: java.nio.ByteBuffer? = null
         var boneWeights: java.nio.ByteBuffer? = null
         if (skinned) {
             val joints = prim.joints ?: IntArray(vertexCount * 4)
             val weights = prim.weights ?: FloatArray(vertexCount * 4)
-            val jb = alloc(vertexCount * 4)
+            // u16 × 4 = 8 bytes per vertex
+            val jb = ByteBuffer.allocateDirect(vertexCount * 8)
+                .order(ByteOrder.nativeOrder())
             for (v in 0 until vertexCount * 4) jb.putShort(joints[v].toShort())
             jb.rewind()
-            val wb = alloc(vertexCount * 4)
+            val wb = alloc(vertexCount * 4) // float × 4 = 16 bytes ✓
             for (v in 0 until vertexCount * 4) wb.putFloat(weights[v])
             wb.rewind()
             boneIndices = jb
