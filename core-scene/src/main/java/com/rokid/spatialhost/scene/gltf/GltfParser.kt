@@ -1,5 +1,6 @@
 package com.rokid.spatialhost.scene.gltf
 
+import org.json.JSONArray
 import org.json.JSONObject
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -17,6 +18,10 @@ data class GltfPrimitive(
     val indices: IntArray,
     val material: Int? = null,
     val tangents: FloatArray? = null, // xyzw per vertex or null
+    /** JOINTS_0:4 bone indices per vertex (into the skin's joints), or null. */
+    val joints: IntArray? = null,
+    /** WEIGHTS_0: 4 weights per vertex (sum ≈ 1), or null. */
+    val weights: FloatArray? = null,
 ) {
     /** Local-space AABB of this primitive. */
     val boundsMin: FloatArray
@@ -52,6 +57,8 @@ data class GltfNode(
     val translation: FloatArray? = null,
     val rotation: FloatArray? = null, // quat x,y,z,w
     val scale: FloatArray? = null,
+    /** Index into [GltfModel.skins] when this node instantiates a skinned mesh. */
+    val skin: Int? = null,
 )
 
 /**
@@ -92,6 +99,20 @@ data class GltfTexture(
     val wrapS: Int = 10497,
     val wrapT: Int = 10497,
 )
+
+/**
+ * A glTF skin: joint nodes + inverse bind matrices (16 floats each,
+ * column-major — the bind-pose inverse used by skinning).
+ */
+data class GltfSkin(
+    /** Node indices driven by this skin, in JOINTS_n index order. */
+    val joints: IntArray,
+    /** Packed inverse bind matrices, 16 floats per joint. */
+    val inverseBindMatrices: FloatArray,
+    val name: String = "",
+) {
+    val jointCount: Int get() = joints.size
+}
 
 /**
  * glTF PBR metallic-roughness material (the subset the renderer consumes).
@@ -140,6 +161,8 @@ data class GltfModel(
     val textures: List<GltfTexture> = emptyList(),
     /** Named animation clips (empty for static models). */
     val animations: List<GltfAnimation> = emptyList(),
+    /** Skins (joint sets + inverse bind matrices); empty when static. */
+    val skins: List<GltfSkin> = emptyList(),
 ) {
     /** Total primitive count (progress/logging). */
     val primitiveCount: Int get() = primitives.values.sumOf { it.size }
@@ -315,12 +338,31 @@ object GltfParser {
                         readFloats(accessors[attrs.getInt("TEXCOORD_0")], buffers, bufferViews, 2) else null
                     val tan = if (attrs.has("TANGENT"))
                         readFloats(accessors[attrs.getInt("TANGENT")], buffers, bufferViews, 4) else null
+                    // Skin attributes: JOINTS_0 = 4 u8/u16 indices, WEIGHTS_0
+                    // = 4 floats (or normalized u8/u16 — readFloats converts).
+                    val jIdx = if (attrs.has("JOINTS_0")) attrs.getInt("JOINTS_0") else -1
+                    val joints = if (jIdx >= 0 && jIdx < accessors.size) {
+                        readFloats(accessors[jIdx], buffers, bufferViews, 4)
+                            .map { it.toInt() }.toIntArray()
+                    } else null
+                    val wIdx = if (attrs.has("WEIGHTS_0")) attrs.getInt("WEIGHTS_0") else -1
+                    val weights = if (wIdx >= 0 && wIdx < accessors.size) {
+                        val wAcc = accessors[wIdx]
+                        val raw = readFloats(wAcc, buffers, bufferViews, 4)
+                        // Integer weights are normalized per spec (u8 → /255,
+                        // u16 → /65535); floats pass through.
+                        when (wAcc.componentType) {
+                            5121 -> FloatArray(raw.size) { raw[it] / 255f }
+                            5123 -> FloatArray(raw.size) { raw[it] / 65535f }
+                            else -> raw
+                        }
+                    } else null
                     val idx = if (prim.has("indices"))
                         readIndices(accessors[prim.getInt("indices")], buffers, bufferViews)
                     else IntArray(pos.size / 3) { it }
                     if (pos.isEmpty() || idx.isEmpty()) continue
                     val matIdx = if (prim.has("material")) prim.getInt("material") else null
-                    out.add(GltfPrimitive(pos, nrm, uv, idx, matIdx, tan))
+                    out.add(GltfPrimitive(pos, nrm, uv, idx, matIdx, tan, joints, weights))
                 }
                 if (out.isNotEmpty()) primitives[m] = out
             }
@@ -352,9 +394,30 @@ object GltfParser {
                     n.optString("name", "node$i"), matrix, children,
                     if (n.has("mesh")) n.getInt("mesh") else null,
                     translation = t, rotation = r, scale = s,
+                    skin = n.optInt("skin", -1).takeIf { it >= 0 },
                 )
             }
         } ?: emptyArray()
+
+        // --- skins (joints + inverse bind matrices) ---
+        val skins = root.optJSONArray("skins")?.let { arr ->
+            List(arr.length()) { i ->
+                val sk = arr.getJSONObject(i)
+                val jointsArr = sk.optJSONArray("joints") ?: JSONArray()
+                val joints = IntArray(jointsArr.length()) { jointsArr.getInt(it) }
+                val ibmAcc = sk.optInt("inverseBindMatrices", -1)
+                // MAT4 accessor → 16 floats per joint, verbatim.
+                val ibm = if (ibmAcc in accessors.indices) {
+                    readFloats(accessors[ibmAcc], buffers, bufferViews, 16)
+                } else {
+                    // Identity fallback: 1 on the diagonal of each 16-float block.
+                    FloatArray(joints.size * 16) { idx ->
+                        if (idx % 16 in intArrayOf(0, 5, 10, 15)) 1f else 0f
+                    }
+                }
+                GltfSkin(joints, ibm, sk.optString("name", "skin$i"))
+            }
+        } ?: emptyList()
 
         // --- animations (rigid channels; skins/morphs are a later step) ---
         // A channel whose target node/path we cannot honor is dropped, and
@@ -456,6 +519,7 @@ object GltfParser {
             materials = materials,
             textures = textures,
             animations = animations,
+            skins = skins,
         )
     }
 
@@ -482,6 +546,7 @@ object GltfParser {
         "VEC2" -> 2
         "VEC3" -> 3
         "VEC4" -> 4
+        "MAT4" -> 16 // inverse bind matrices (skinning)
         else -> throw IllegalArgumentException("accessor type $type unsupported")
     }
 

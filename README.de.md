@@ -46,9 +46,10 @@ der Pfad ist also reproduzierbar.
 | **IBL-Skybox-Hintergrund + beleuchteter Schattenboden + dynamische Schatten** | ✅ |
 | **Emissive- + AO-Maps; sRGB/Linear-Farbraum-Split gefixt** | ✅ |
 | **STL-Import + All-Files-Modell-Scan + Szenen-Rebuild-Resilienz** | ✅ |
-| **CI (GitHub Actions) + 12 JVM-Tests der Asset-Pipeline** | ✅ |
+| **CI (GitHub Actions) + 17 JVM-Tests der Asset-Pipeline** | ✅ |
 | **Sandbox: mehrere Objekte, B-Clone/DEL-Delete, Physik-Stapel** | ✅ |
 | **glTF-Animationen: harte Clips (LINEAR/STEP/CUBICSPLINE) + Export** | ✅ |
+| **Skinning: JOINTS/WEIGHTS → GPU-Knochen (≤255), gltfio-Formel** | ✅ |
 | Release-Build (mit Debug-Key signiert, arm64-only ~26 MB) | ✅ |
 
 ## Voraussetzungen
@@ -454,7 +455,7 @@ nächsten echten Klick** (Symptom: zweimal klicken; in adb-Skripten tat
 - [x] **CI**: GitHub-Actions-Workflow (`test assembleDebug` bei jedem
       Push/PR) — fertig: `.github/workflows/ci.yml`, grün
 - [x] **Parser-Testsuite**: Round-Trip-Tests `GltfParser` ↔
-      `GltfExporter` + STL + Animations-Round-Trip — fertig: 12
+      `GltfExporter` + STL + Animations-/Skin-Round-Trip — fertig: 17
       JVM-Tests in `core-scene`
 
 ### Mittelfristig (echte Features)
@@ -467,8 +468,14 @@ nächsten echten Klick** (Symptom: zweimal klicken; in adb-Skripten tat
       Quaternion-Nlerp-Normalisierung), ein `Animator` pro Objekt tickt
       im Renderloop und schreibt Node-Transformen (Looping, Frame-Delta-
       Clamp); Export zurück ins GLB (TRS-Nodes). Steuerung: `A`
-      Play/Pause, `G` nächster Clip. **Skinning (JOINTS/WEIGHTS →
-      Knochenmatrizen) weiterhin offen** — Charaktere brauchen es
+      Play/Pause, `G` nächster Clip
+- [x] **Skinning** — fertig: `skins` (Joints + Inverse-Bind-Matrizen) und
+      `JOINTS_0`/`WEIGHTS_0` geparst (u8/u16-Indizes, normalisierte
+      u8/u16-Gewichte); pro Renderable `Builder.skinning(≤255)` mit
+      Bone-Slots im Vertex-Buffer; jeden Frame rechnet der Renderthread
+      `bone[j] = inverse(meshWorld) · jointWorld[j] · IBM[j]` — exakt die
+      gltfio-Formel — und speist `setBonesAsMatrices`. Export zurück ins
+      GLB. Animierte Charaktere bewegen sich jetzt korrekt
 - [ ] **Morph-Targets**, komprimiertes glTF (Draco/KTX2) — Decoder
       nötig
 - [ ] **Voller Material-Export**: `.mtl` für OBJ, Re-Encoded Texturen

@@ -45,9 +45,10 @@ path can be reproduced.
 | **IBL skybox background + lit shadow floor + dynamic shadows** | ✅ |
 | **Emissive + AO maps; sRGB/linear color-space split fixed** | ✅ |
 | **STL import + all-files model scan + scene-rebuild resilience** | ✅ |
-| **CI (GitHub Actions) + 12 JVM asset-pipeline tests** | ✅ |
+| **CI (GitHub Actions) + 17 JVM asset-pipeline tests** | ✅ |
 | **Sandbox: multiple objects, B-clone/DEL-delete, physics stacking** | ✅ |
 | **glTF animations: rigid clips (LINEAR/STEP/CUBICSPLINE) + export** | ✅ |
+| **Skinning: JOINTS/WEIGHTS → GPU bones (≤255), gltfio formula** | ✅ |
 | Release build (debug-key signed, arm64-only ~26 MB) | ✅ |
 
 ## Requirements
@@ -432,7 +433,7 @@ right after `input swipe` did nothing).
 - [x] **CI**: GitHub Actions workflow (`test assembleDebug` on push/PR) —
       done: `.github/workflows/ci.yml`, green on every push
 - [x] **Parser test suite**: round-trip tests for `GltfParser` ↔
-      `GltfExporter` + STL + animation round-trip — done: 12 JVM
+      `GltfExporter` + STL + animation/skin round-trip — done: 17 JVM
       tests in `core-scene`
 
 ### Medium-term (real features)
@@ -445,8 +446,14 @@ right after `input swipe` did nothing).
       nlerp), an `Animator` per object ticks on the render thread and
       writes node transforms (looping playback, frame-delta clamp);
       exported back to GLB (TRS nodes). Controls: `A` play/pause, `G`
-      next clip. **Skinning (JOINTS/WEIGHTS → bone matrices) still open**
-      — characters need it
+      next clip
+- [x] **Skinning** — done: `skins` (joints + inverse bind matrices) and
+      `JOINTS_0`/`WEIGHTS_0` parsed (u8/u16 indices, normalized u8/u16
+      weights); per renderable `Builder.skinning(≤255)` with bone slots in
+      the vertex buffer; every frame the render thread computes
+      `bone[j] = inverse(meshWorld) · jointWorld[j] · IBM[j]` — the exact
+      gltfio formula — and feeds `setBonesAsMatrices`. Exported back to
+      GLB. Characters with animations now move correctly
 - [ ] **Morph targets**, Draco/KTX2-compressed glTF (needs a decoder —
       draco-android or a pure-Kotlin path)
 - [ ] **Full material export**: `.mtl` for OBJ, re-encoded textures in

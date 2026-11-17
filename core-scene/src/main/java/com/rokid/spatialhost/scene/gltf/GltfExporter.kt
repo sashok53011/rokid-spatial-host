@@ -37,6 +37,15 @@ object GltfExporter {
             return off to a.size * 4
         }
 
+        fun putShorts(a: IntArray): Pair<Int, Int> {
+            align4()
+            val off = bin.size()
+            val bb = ByteBuffer.allocate(a.size * 2).order(ByteOrder.LITTLE_ENDIAN)
+            for (v in a) bb.putShort(v.toShort())
+            bin.write(bb.array())
+            return off to a.size * 2
+        }
+
         fun putIndices(idx: IntArray, u16: Boolean): Pair<Int, Int> {
             align4()
             val off = bin.size()
@@ -112,6 +121,37 @@ object GltfExporter {
                     )
                     bufferViews.put(JSONObject_().put("buffer", 0).put("byteOffset", uo).put("byteLength", ul).put("target", TARGET_ARRAY_BUFFER))
                     attrs.put("TEXCOORD_0", uAcc)
+                }
+
+                // Skin attributes (D6): JOINTS_0 as u16 VEC4, WEIGHTS_0 as
+                // float VEC4 — both legal glTF component types.
+                prim.joints?.let { j ->
+                    if (j.size == prim.positions.size / 3 * 4 && prim.weights != null) {
+                        val (jo, jl) = putShorts(j)
+                        val jAcc = accessors.length()
+                        accessors.put(
+                            JSONObject_()
+                                .put("bufferView", bufferViews.length())
+                                .put("componentType", 5123)
+                                .put("count", j.size / 4)
+                                .put("type", "VEC4"),
+                        )
+                        bufferViews.put(JSONObject_().put("buffer", 0).put("byteOffset", jo).put("byteLength", jl).put("target", TARGET_ARRAY_BUFFER))
+                        attrs.put("JOINTS_0", jAcc)
+
+                        val w = prim.weights
+                        val (wo, wl) = putFloats(w)
+                        val wAcc = accessors.length()
+                        accessors.put(
+                            JSONObject_()
+                                .put("bufferView", bufferViews.length())
+                                .put("componentType", 5126)
+                                .put("count", w.size / 4)
+                                .put("type", "VEC4"),
+                        )
+                        bufferViews.put(JSONObject_().put("buffer", 0).put("byteOffset", wo).put("byteLength", wl).put("target", TARGET_ARRAY_BUFFER))
+                        attrs.put("WEIGHTS_0", wAcc)
+                    }
                 }
 
                 val maxIdx = prim.indices.maxOrNull() ?: 0
@@ -208,7 +248,32 @@ object GltfExporter {
                 n.put("children", JSONArray_().also { arr -> node.children.forEach { arr.put(it) } })
             }
             node.mesh?.let { meshRemap[it]?.let { remapped -> n.put("mesh", remapped) } }
+            node.skin?.let { if (it in model.skins.indices) n.put("skin", it) }
             nodesJson.put(n)
+        }
+
+        // --- skins (joints verbatim, IBM as MAT4 accessors) ----------
+        val skinsJson = JSONArray_()
+        for (skin in model.skins) {
+            if (skin.joints.isEmpty()) continue
+            val jointsOut = JSONArray_()
+            for (j in skin.joints) jointsOut.put(j)
+            val (io, il) = putFloats(skin.inverseBindMatrices)
+            val ibmAcc = accessors.length()
+            accessors.put(
+                JSONObject_()
+                    .put("bufferView", bufferViews.length())
+                    .put("componentType", 5126)
+                    .put("count", skin.jointCount)
+                    .put("type", "MAT4"),
+            )
+            bufferViews.put(JSONObject_().put("buffer", 0).put("byteOffset", io).put("byteLength", il))
+            skinsJson.put(
+                JSONObject_()
+                    .put("name", skin.name)
+                    .put("joints", jointsOut)
+                    .put("inverseBindMatrices", ibmAcc),
+            )
         }
 
         // --- animations (rigid channels; verbatim times/values) -----
@@ -291,6 +356,7 @@ object GltfExporter {
         }
         if (materialsJson.length() > 0) rootJson.put("materials", materialsJson)
         if (animationsJson.length() > 0) rootJson.put("animations", animationsJson)
+        if (skinsJson.length() > 0) rootJson.put("skins", skinsJson)
 
         // --- GLB container --------------------------------------------
         val jsonBytes = rootJson.toString().toByteArray(Charsets.UTF_8)

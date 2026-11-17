@@ -465,6 +465,7 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
                 // animates in the same frame.
                 sceneState?.modelManager?.let { mm ->
                     mm.tickAnimations(System.nanoTime())
+                    mm.updateBones() // D6: skinning matrices follow joints
                     animationStatus = mm.hudStatus()
                 }
 
