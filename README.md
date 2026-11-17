@@ -2,6 +2,8 @@
 
 **Languages**: [Русский](README.ru.md) · [Deutsch](README.de.md) · English (this file)
 
+**Docs**: [Modules](docs/MODULES.md) · [Architecture](docs/ARCHITECTURE.md) · [Capabilities](docs/CAPABILITIES.md) · [Future](docs/FUTURE.md)
+
 [![CI](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
 
 Native Android spatial host for **Rokid Max** AR glasses — an immersive

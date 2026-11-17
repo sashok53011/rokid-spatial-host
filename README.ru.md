@@ -19,6 +19,8 @@ PBR-материалами, физика твёрдых тел и экспорт
 
 **Языки**: [English](README.md) · [Deutsch](README.de.md) · Русский (этот файл)
 
+**Документация** (на английском): [Модули](docs/MODULES.md) · [Архитектура](docs/ARCHITECTURE.md) · [Возможности](docs/CAPABILITIES.md) · [Перспективы](docs/FUTURE.md)
+
 [![CI](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
 
 ## Статус

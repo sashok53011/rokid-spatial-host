@@ -174,6 +174,21 @@ which module each direction would touch.
   + provisioning for the headless box.
 * **Touches**: `core-bridge` (classifier), `:app` (lifecycle).
 
+### 16. Full material export — `.mtl`, textures, KHR extensions [roadmap]
+
+* **Exists**: `GltfExporter.toGlb` re-emits PBR factors, texture
+  references and the **original encoded image bytes** (verbatim, no
+  re-encode); `toObj` writes geometry only.
+* **Missing**: an `.mtl` sidecar for OBJ export (Kd/Ks/Ns/map_Kd derived
+  from `GltfMaterial`); texture re-encoding paths where the source is
+  not a portable byte blob (e.g. future decoded/procedural textures);
+  **KHR extension round-trip** — parse and re-emit `unlit`, `clearcoat`,
+  `transmission` (today unknown extensions are silently dropped by
+  `GltfParser`, so e.g. `KHR_materials_unlit` models lose their flag).
+* **Touches**: `core-scene` (`GltfParser`, `GltfExporter`) + JVM
+  round-trip tests. Natural companion to #4 (OBJ import): together they
+  close the import↔export loop for the common DCC formats.
+
 ---
 
 ## Long-term / experimental — names to search [roadmap]

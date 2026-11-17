@@ -20,6 +20,8 @@ der Pfad ist also reproduzierbar.
 
 **Sprachen**: [English](README.md) · [Русский](README.ru.md) · Deutsch (diese Datei)
 
+**Doku** (auf Englisch): [Module](docs/MODULES.md) · [Architektur](docs/ARCHITECTURE.md) · [Fähigkeiten](docs/CAPABILITIES.md) · [Perspektiven](docs/FUTURE.md)
+
 [![CI](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
 
 ## Status
