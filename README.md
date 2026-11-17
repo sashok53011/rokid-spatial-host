@@ -91,9 +91,14 @@ adb logcat -s SpatialHost FilamentRenderer MaterialFactory ModelManager \
 ```
 
 First start: allow the storage permission when asked (it makes local
-video/model scanning work), plug the glasses into the box's USB port —
+video/model scanning work), plug the glasses into the box's USB port -
 the bridge connects automatically and the 360° video auto-starts ~3 s
 later.
+
+**Important (phone hosts)**: before entering glasses mode the device
+**must be switched to landscape (album) orientation** — this is
+required, the app does not rotate it automatically. On a phone in
+portrait the glasses mode will not come up correctly.
 
 Requirements recap: `gradle.properties` pins **Filament 1.75.1** (1.80.x
 needs compileSdk 37), **Kotlin 2.4.x**, AGP from the version catalog.

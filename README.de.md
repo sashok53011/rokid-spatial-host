@@ -92,8 +92,13 @@ adb logcat -s SpatialHost FilamentRenderer MaterialFactory ModelManager \
 ```
 
 Erster Start: Speicherzugriff erlauben (damit das Scannen lokaler
-Videos/Modelle funktioniert), Brille ins USB der Box stecken — die
+Videos/Modelle funktioniert), Brille ins USB der Box stecken - die
 Bridge verbindet sich selbst, das360°-Video startet ~3 s später.
+
+**Wichtig (Phone-Hosts)**: Vor dem Eintritt in den Brillen-Modus muss
+das Gerät **zwingend in Querformat (Album-/Landscape-Modus)** gedreht
+werden — die App macht das nicht automatisch. Im Hochformat kommt der
+Brillen-Modus nicht korrekt hoch.
 
 Zusammenfassung: `gradle.properties` pinnt **Filament 1.75.1**
 (für 1.80.x braucht man compileSdk 37), **Kotlin 2.4.x**, AGP aus dem
