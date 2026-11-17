@@ -142,6 +142,10 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
         class Load(val id: String, val model: GltfModel, val matrix: FloatArray) : ModelOp
         class Transform(val id: String, val matrix: FloatArray) : ModelOp
         class Remove(val id: String) : ModelOp
+        /** Toggle play/pause of model animations. */
+        object AnimToggle : ModelOp
+        /** Switch every object to the next animation clip. */
+        object AnimClip : ModelOp
     }
 
     @Volatile
@@ -165,6 +169,24 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
     fun requestRemoveModel(id: String) {
         postModelOp(ModelOp.Remove(id))
     }
+
+    /** Queue play/pause of model animations (A key). */
+    fun requestAnimationToggle() {
+        postModelOp(ModelOp.AnimToggle)
+    }
+
+    /** Queue switching to the next animation clip (G key). */
+    fun requestNextAnimationClip() {
+        postModelOp(ModelOp.AnimClip)
+    }
+
+    /**
+     * HUD snapshot of animation playback, maintained by the render loop:
+     * "off" | "paused" | "clip 1/2 Walk 1.25/3.00s".
+     */
+    @Volatile
+    var animationStatus: String = "off"
+        private set
 
     private var thread: Thread? = null
 
@@ -425,9 +447,25 @@ class FilamentRenderer(private val surfaceView: SurfaceView) : SurfaceHolder.Cal
                                 is ModelOp.Load -> mm.load(op.id, op.model, op.matrix)
                                 is ModelOp.Transform -> mm.setMatrix(op.id, op.matrix)
                                 is ModelOp.Remove -> mm.release(op.id)
+                                is ModelOp.AnimToggle -> {
+                                    val playing = mm.toggleAnimations()
+                                    Log.i(TAG, "animations $playing")
+                                }
+
+                                is ModelOp.AnimClip -> {
+                                    val idx = mm.nextAnimationClip()
+                                    Log.i(TAG, "animation clip → $idx")
+                                }
                             }
                         }
                     }
+                }
+
+                // Rigid-keyframe animation (D5) — after ops so a fresh load
+                // animates in the same frame.
+                sceneState?.modelManager?.let { mm ->
+                    mm.tickAnimations(System.nanoTime())
+                    animationStatus = mm.hudStatus()
                 }
 
                 // Video/color sphere requests (color FIRST so a rapid

@@ -191,15 +191,88 @@ object GltfExporter {
             materialsJson.put(m)
         }
 
-        // --- nodes (verbatim matrices, children unchanged) -------------
+        // --- nodes (TRS when known — animated nodes must not carry a
+        // matrix per glTF; matrix verbatim otherwise) ---------------
         val nodesJson = JSONArray_()
         for (node in model.nodes) {
-            val n = JSONObject_().put("name", node.name).put("matrix", floatList(node.matrix, -1))
+            val n = JSONObject_()
+                .put("name", node.name)
+            if (node.translation != null && node.rotation != null && node.scale != null) {
+                n.put("translation", floatList(node.translation, -1))
+                    .put("rotation", floatList(node.rotation, -1))
+                    .put("scale", floatList(node.scale, -1))
+            } else {
+                n.put("matrix", floatList(node.matrix, -1))
+            }
             if (node.children.isNotEmpty()) {
                 n.put("children", JSONArray_().also { arr -> node.children.forEach { arr.put(it) } })
             }
             node.mesh?.let { meshRemap[it]?.let { remapped -> n.put("mesh", remapped) } }
             nodesJson.put(n)
+        }
+
+        // --- animations (rigid channels; verbatim times/values) -----
+        val animationsJson = JSONArray_()
+        for (anim in model.animations) {
+            if (anim.channels.isEmpty() || anim.samplers.isEmpty()) continue
+            val samplersOut = JSONArray_()
+            val samplerRemap = HashMap<Int, Int>() // original index → emitted
+            for ((origIdx, sm) in anim.samplers.withIndex()) {
+                if (sm.times.isEmpty()) continue
+                // output components per key (CUBICSPLINE stores 3 entries/key)
+                val perKey = if (sm.interpolation == "CUBICSPLINE") 3 else 1
+                val elems = sm.times.size * perKey
+                if (elems == 0 || sm.values.size % elems != 0) continue
+                val comps = sm.values.size / elems
+                if (comps != 3 && comps != 4) continue
+                val (to, tl) = putFloats(sm.times)
+                val tAcc = accessors.length()
+                accessors.put(
+                    JSONObject_()
+                        .put("bufferView", bufferViews.length())
+                        .put("componentType", 5126)
+                        .put("count", sm.times.size)
+                        .put("type", "SCALAR")
+                        .put("min", floatList(floatArrayOf(sm.times.min()), -1))
+                        .put("max", floatList(floatArrayOf(sm.times.max()), -1)),
+                )
+                bufferViews.put(JSONObject_().put("buffer", 0).put("byteOffset", to).put("byteLength", tl))
+                val (vo, vl) = putFloats(sm.values)
+                val vAcc = accessors.length()
+                accessors.put(
+                    JSONObject_()
+                        .put("bufferView", bufferViews.length())
+                        .put("componentType", 5126)
+                        .put("count", sm.values.size / comps)
+                        .put("type", if (comps == 4) "VEC4" else "VEC3"),
+                )
+                bufferViews.put(JSONObject_().put("buffer", 0).put("byteOffset", vo).put("byteLength", vl))
+                samplersOut.put(
+                    JSONObject_()
+                        .put("input", tAcc)
+                        .put("output", vAcc)
+                        .put("interpolation", sm.interpolation),
+                )
+                samplerRemap[origIdx] = samplersOut.length() - 1
+            }
+            if (samplersOut.length() == 0) continue
+            val channelsOut = JSONArray_()
+            for (ch in anim.channels) {
+                if (ch.node !in model.nodes.indices) continue
+                val emitted = samplerRemap[ch.sampler] ?: continue
+                channelsOut.put(
+                    JSONObject_()
+                        .put("sampler", emitted)
+                        .put("target", JSONObject_().put("node", ch.node).put("path", ch.path)),
+                )
+            }
+            if (channelsOut.length() == 0) continue
+            animationsJson.put(
+                JSONObject_()
+                    .put("name", anim.name)
+                    .put("samplers", samplersOut)
+                    .put("channels", channelsOut),
+            )
         }
 
         val rootJson = JSONObject_()
@@ -217,6 +290,7 @@ object GltfExporter {
             rootJson.put("textures", texturesJson)
         }
         if (materialsJson.length() > 0) rootJson.put("materials", materialsJson)
+        if (animationsJson.length() > 0) rootJson.put("animations", animationsJson)
 
         // --- GLB container --------------------------------------------
         val jsonBytes = rootJson.toString().toByteArray(Charsets.UTF_8)

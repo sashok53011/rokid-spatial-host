@@ -43,6 +43,43 @@ data class GltfNode(
     val matrix: FloatArray, // local transform, column-major (glTF convention)
     val children: IntArray,
     val mesh: Int?,
+    /**
+     * Base TRS (raw glTF values) when the node is defined by translation/
+     * rotation/scale — animation targets override these components at
+     * runtime. Null for matrix-defined nodes (animating those falls back
+     * to identity for non-animated components).
+     */
+    val translation: FloatArray? = null,
+    val rotation: FloatArray? = null, // quat x,y,z,w
+    val scale: FloatArray? = null,
+)
+
+/**
+ * One animation channel: which node property a sampler drives.
+ * path ∈ "translation" | "rotation" | "scale".
+ */
+data class GltfChannel(
+    val node: Int,
+    val path: String,
+    val sampler: Int,
+)
+
+/**
+ * Animation sampler: keyframe times (seconds) → interleaved values
+ * (3 floats per key for translation/scale, 4 for rotation) with an
+ * interpolation mode ("LINEAR" | "STEP" | "CUBICSPLINE").
+ */
+data class GltfSampler(
+    val times: FloatArray,
+    val values: FloatArray,
+    val interpolation: String,
+)
+
+/** A named glTF animation (clips play in order, looping). */
+data class GltfAnimation(
+    val name: String,
+    val channels: List<GltfChannel>,
+    val samplers: List<GltfSampler>,
 )
 
 /**
@@ -101,6 +138,8 @@ data class GltfModel(
     val materials: List<GltfMaterial> = emptyList(),
     /** Textures referenced by materials (decoded at load time). */
     val textures: List<GltfTexture> = emptyList(),
+    /** Named animation clips (empty for static models). */
+    val animations: List<GltfAnimation> = emptyList(),
 ) {
     /** Total primitive count (progress/logging). */
     val primitiveCount: Int get() = primitives.values.sumOf { it.size }
@@ -109,6 +148,9 @@ data class GltfModel(
 object GltfParser {
 
     private const val TAG = "GltfParser"
+
+    /** Node paths a rigid channel may animate (weights → morph, skipped). */
+    private val ANIMATED_PATHS = setOf("translation", "rotation", "scale")
 
     /**
      * @param bytes        .glb file bytes (or .gltf JSON bytes)
@@ -292,19 +334,75 @@ object GltfParser {
                 val children = n.optJSONArray("children")?.let { c ->
                     IntArray(c.length()) { c.getInt(it) }
                 } ?: IntArray(0)
-                val matrix = if (n.has("matrix")) {
+                val matrix: FloatArray
+                val t: FloatArray?
+                val r: FloatArray?
+                val s: FloatArray?
+                if (n.has("matrix")) {
                     val m = n.getJSONArray("matrix")
-                    FloatArray(16) { m.getDouble(it).toFloat() }
+                    matrix = FloatArray(16) { m.getDouble(it).toFloat() }
+                    t = null; r = null; s = null
                 } else {
-                    trsMatrix(
-                        jsonArrayFloats(n, "translation", 0f, 3),
-                        jsonArrayFloats(n, "rotation", 0f, 4, wDefault = 1f),
-                        jsonArrayFloats(n, "scale", 1f, 3),
-                    )
+                    t = jsonArrayFloats(n, "translation", 0f, 3)
+                    r = jsonArrayFloats(n, "rotation", 0f, 4, wDefault = 1f)
+                    s = jsonArrayFloats(n, "scale", 1f, 3)
+                    matrix = trsMatrix(t, r, s)
                 }
-                GltfNode(n.optString("name", "node$i"), matrix, children, if (n.has("mesh")) n.getInt("mesh") else null)
+                GltfNode(
+                    n.optString("name", "node$i"), matrix, children,
+                    if (n.has("mesh")) n.getInt("mesh") else null,
+                    translation = t, rotation = r, scale = s,
+                )
             }
         } ?: emptyArray()
+
+        // --- animations (rigid channels; skins/morphs are a later step) ---
+        // A channel whose target node/path we cannot honor is dropped, and
+        // a sampler shared by channels is read once (glTF allows reuse).
+        val animations = mutableListOf<GltfAnimation>()
+        root.optJSONArray("animations")?.let { anims ->
+            for (a in 0 until anims.length()) {
+                val anim = anims.getJSONObject(a)
+                val samplersJson = anim.optJSONArray("samplers") ?: continue
+                val samplers = List(samplersJson.length()) { si ->
+                    val sm = samplersJson.getJSONObject(si)
+                    // input: SCALAR f32 times; output: VEC3/VEC4 values
+                    val inAcc = accessors[sm.getInt("input")]
+                    val outAcc = accessors[sm.getInt("output")]
+                    val comps = when (outAcc.type) {
+                        "VEC4" -> 4
+                        else -> 3
+                    }
+                    GltfSampler(
+                        times = readFloats(inAcc, buffers, bufferViews, 1),
+                        values = readFloats(outAcc, buffers, bufferViews, comps),
+                        interpolation = sm.optString("interpolation", "LINEAR"),
+                    )
+                }
+                val channelsJson = anim.optJSONArray("channels") ?: continue
+                val channels = mutableListOf<GltfChannel>()
+                for (ci in 0 until channelsJson.length()) {
+                    val ch = channelsJson.getJSONObject(ci)
+                    val target = ch.optJSONObject("target") ?: continue
+                    val path = target.optString("path")
+                    val nodeIdx = target.optInt("node", -1)
+                    val samplerIdx = ch.optInt("sampler", -1)
+                    if (path !in ANIMATED_PATHS) continue // weights (morph) unsupported for now
+                    if (nodeIdx !in nodes.indices) continue
+                    if (samplerIdx !in samplers.indices) continue
+                    channels.add(GltfChannel(nodeIdx, path, samplerIdx))
+                }
+                if (channels.isNotEmpty()) {
+                    animations.add(
+                        GltfAnimation(
+                            anim.optString("name", "clip$a"),
+                            channels,
+                            samplers,
+                        ),
+                    )
+                }
+            }
+        }
 
         val roots = root.optJSONArray("scenes")?.let { scenes ->
             val s = scenes.getJSONObject(root.optInt("scene", 0))
@@ -357,6 +455,7 @@ object GltfParser {
             name = name,
             materials = materials,
             textures = textures,
+            animations = animations,
         )
     }
 
@@ -482,7 +581,8 @@ object GltfParser {
     }
 
     /** translation/rotation(quat x,y,z,w at index0)/scale → column-major matrix. */
-    private fun trsMatrix(t: FloatArray, r: FloatArray, s: FloatArray): FloatArray {
+    /** TRS → column-major matrix (public for [Animator] sampling). */
+    fun trsMatrix(t: FloatArray, r: FloatArray, s: FloatArray): FloatArray {
         val (qx, qy, qz, qw) = floatArrayOf(r[0], r[1], r[2], r[3])
         // rotation matrix (column-major)
         val m00 = 1f - 2f * (qy * qy + qz * qz)

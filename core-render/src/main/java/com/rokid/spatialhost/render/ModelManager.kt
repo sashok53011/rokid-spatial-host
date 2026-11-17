@@ -15,6 +15,7 @@ import com.google.android.filament.Texture
 import com.google.android.filament.TextureSampler
 import com.google.android.filament.TransformManager
 import com.google.android.filament.VertexBuffer
+import com.rokid.spatialhost.scene.gltf.Animator
 import com.rokid.spatialhost.scene.gltf.GltfModel
 import com.rokid.spatialhost.scene.gltf.GltfPrimitive
 import com.rokid.spatialhost.scene.gltf.GltfTexture
@@ -41,9 +42,15 @@ class ModelManager(
     class LoadedModel(val id: String, val groupEntity: Int, val groupTransform: Int) {
         val primitiveEntities = mutableListOf<Int>()
         val nodeEntities = mutableMapOf<Int, Int>()
+        /** node index → TransformManager instance (animation writes here). */
+        val nodeTransforms = mutableMapOf<Int, Int>()
         val meshBuffers = mutableListOf<Pair<VertexBuffer, IndexBuffer>>()
         val instances = mutableListOf<MaterialInstance>()
         var matrix: FloatArray = IDENT
+        /** Rigid-keyframe playback (null when the asset has no clips). */
+        var animator: Animator? = null
+        /** Wall-clock of the last animation step (frame-delta clamp). */
+        var lastAnimNs: Long = 0L
     }
 
     /** Live scene objects by id (the sandbox holds several). */
@@ -106,6 +113,7 @@ class ModelManager(
             val nodeTf = tm.create(nodeEntity, parentTf, node.matrix)
             scene.addEntity(nodeEntity)
             lm.nodeEntities[nodeIdx] = nodeEntity
+            lm.nodeTransforms[nodeIdx] = nodeTf
 
             model.primitives[node.mesh]?.forEach { prim ->
                 val matDef = prim.material?.let { model.materials.getOrNull(it) }
@@ -173,6 +181,8 @@ class ModelManager(
         for (root in model.sceneRootNodes) walk(root, groupTf)
 
         models[id] = lm
+        lm.animator = if (model.animations.isNotEmpty()) Animator(model) else null
+        lm.lastAnimNs = System.nanoTime()
         model.primitives.values.firstOrNull()?.firstOrNull()?.let { p ->
             Log.i(
                 TAG,
@@ -196,6 +206,68 @@ class ModelManager(
         val lm = models[id] ?: return
         lm.matrix = matrix
         engine.transformManager.setTransform(lm.groupTransform, matrix)
+    }
+
+    /**
+     * Advance rigid-keyframe animations (render thread, per frame).
+     * dt is clamped to 250 ms so a stall doesn't fling keyframes.
+     * Returns true when any model has clips (HUD/feedback).
+     */
+    fun tickAnimations(nowNs: Long): Boolean {
+        val tm = engine.transformManager
+        var any = false
+        for (lm in models.values) {
+            val anim = lm.animator ?: continue
+            any = true
+            if (!anim.playing) continue
+            val last = lm.lastAnimNs
+            lm.lastAnimNs = nowNs
+            if (last == 0L) continue
+            val dt = ((nowNs - last) / 1_000_000_000.0).coerceIn(0.0, 0.25).toFloat()
+            if (dt <= 0f) continue
+            anim.advance(dt)
+            for ((nodeIdx, matrix) in anim.sample()) {
+                val tf = lm.nodeTransforms[nodeIdx] ?: continue
+                tm.setTransform(tf, matrix)
+            }
+        }
+        return any
+    }
+
+    /** Play/pause animations of every object; returns new playing state. */
+    fun toggleAnimations(): Boolean {
+        var target = false
+        for (lm in models.values) lm.animator?.let { if (!it.playing) target = true }
+        for (lm in models.values) lm.animator?.playing = target
+        return target
+    }
+
+    /** HUD line for animations: "off" | "clip 1/2 Walk 1.25/3.00s". */
+    fun hudStatus(): String {
+        val a = firstAnimator() ?: return "off"
+        if (a.clipCount == 0) return "off"
+        val state = if (a.playing) "" else " PAUSED"
+        return "clip ${a.clipIndex + 1}/${a.clipCount} ${a.clipName()}" +
+            state +
+            " ${"%.2f".format(a.time)}/${"%.2f".format(a.duration())}s"
+    }
+
+    /** First animated object's animator (HUD state), or null. */
+    fun firstAnimator(): Animator? {
+        for (lm in models.values) lm.animator?.let { return it }
+        return null
+    }
+
+    /** Cycle clips of every object (returns the new index or -1). */
+    fun nextAnimationClip(): Int {
+        var next = -1
+        for (lm in models.values) {
+            val a = lm.animator ?: continue
+            if (a.clipCount == 0) continue
+            if (next < 0) next = (a.clipIndex + 1) % a.clipCount
+            a.clipIndex = next
+        }
+        return next
     }
 
     /** Remove one object's entities (textures are shared — see [shutdown]). */

@@ -46,8 +46,9 @@ der Pfad ist also reproduzierbar.
 | **IBL-Skybox-Hintergrund + beleuchteter Schattenboden + dynamische Schatten** | ✅ |
 | **Emissive- + AO-Maps; sRGB/Linear-Farbraum-Split gefixt** | ✅ |
 | **STL-Import + All-Files-Modell-Scan + Szenen-Rebuild-Resilienz** | ✅ |
-| **CI (GitHub Actions) + 6 JVM-Tests der Asset-Pipeline** | ✅ |
+| **CI (GitHub Actions) + 12 JVM-Tests der Asset-Pipeline** | ✅ |
 | **Sandbox: mehrere Objekte, B-Clone/DEL-Delete, Physik-Stapel** | ✅ |
+| **glTF-Animationen: harte Clips (LINEAR/STEP/CUBICSPLINE) + Export** | ✅ |
 | Release-Build (mit Debug-Key signiert, arm64-only ~26 MB) | ✅ |
 
 ## Voraussetzungen
@@ -121,6 +122,8 @@ GitHub Actions (`.github/workflows/ci.yml`) führt bei jedem Push/PR
 | `P` | Physik an/aus — jedes Objekt wird Starrkörper und sie **stapeln** sich auf dem Boden |
 | `B` | **Klon** des selektierten Objekts (spawnt 1 m darüber, wird neu selektiert) |
 | `DEL` | Selektiertes Objekt **löschen** |
+| `A` | Animation Play/Pause (glTF-Clips starten beim Laden selbst) |
+| `G` | Nächster Animations-Clip |
 | `E` | Aktuelles Modell als `.glb` + `.obj` nach Downloads exportieren (Round-Trip verifiziert) |
 | `N` | Nächste Videoquelle |
 | Deck-Widgets anblicken & klicken | Untere „Video"-Platte: PLAY/PAUSE · ‹SRC/SRC› · LOOP-Schalter · SEEK-Slider (Klick = Spule) |
@@ -451,16 +454,21 @@ nächsten echten Klick** (Symptom: zweimal klicken; in adb-Skripten tat
 - [x] **CI**: GitHub-Actions-Workflow (`test assembleDebug` bei jedem
       Push/PR) — fertig: `.github/workflows/ci.yml`, grün
 - [x] **Parser-Testsuite**: Round-Trip-Tests `GltfParser` ↔
-      `GltfExporter` + STL — fertig: 6 JVM-Tests in `core-scene`
+      `GltfExporter` + STL + Animations-Round-Trip — fertig: 12
+      JVM-Tests in `core-scene`
 
 ### Mittelfristig (echte Features)
 
 - [ ] **Phase C — räumliches Webbrowsen**: WebView in eine Quad,
       PC-Desktop-Sharing über den `verto-display-driver`-IPC-Brücke
       (Python-`vdd`-Agent übers LAN)
-- [ ] **glTF-Animationen & Skinning**: Animationskanäle →
-      Filament-`Animator`/Knochentransformen (Charaktermodelle werden
-      nutzbar)
+- [x] **glTF-Animationen (hart)** — fertig: `animations` geparst
+      (Kanäle + Sampler, LINEAR/STEP/CUBICSPLINE mit echtem Hermite +
+      Quaternion-Nlerp-Normalisierung), ein `Animator` pro Objekt tickt
+      im Renderloop und schreibt Node-Transformen (Looping, Frame-Delta-
+      Clamp); Export zurück ins GLB (TRS-Nodes). Steuerung: `A`
+      Play/Pause, `G` nächster Clip. **Skinning (JOINTS/WEIGHTS →
+      Knochenmatrizen) weiterhin offen** — Charaktere brauchen es
 - [ ] **Morph-Targets**, komprimiertes glTF (Draco/KTX2) — Decoder
       nötig
 - [ ] **Voller Material-Export**: `.mtl` für OBJ, Re-Encoded Texturen

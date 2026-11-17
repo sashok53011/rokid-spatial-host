@@ -45,8 +45,9 @@ path can be reproduced.
 | **IBL skybox background + lit shadow floor + dynamic shadows** | ✅ |
 | **Emissive + AO maps; sRGB/linear color-space split fixed** | ✅ |
 | **STL import + all-files model scan + scene-rebuild resilience** | ✅ |
-| **CI (GitHub Actions) + 6 JVM asset-pipeline tests** | ✅ |
+| **CI (GitHub Actions) + 12 JVM asset-pipeline tests** | ✅ |
 | **Sandbox: multiple objects, B-clone/DEL-delete, physics stacking** | ✅ |
+| **glTF animations: rigid clips (LINEAR/STEP/CUBICSPLINE) + export** | ✅ |
 | Release build (debug-key signed, arm64-only ~26 MB) | ✅ |
 
 ## Requirements
@@ -120,6 +121,8 @@ on every push/PR — JDK17 + Android SDK35 on the runner.
 | `P` | Physics on/off — every object becomes a rigid body and they **stack** on the floor |
 | `B` | **Clone** the selected object (spawns 1 m above, becomes the new selection) |
 | `DEL` | **Delete** the selected object |
+| `A` | Animation play/pause (glTF clips autoplay on load) |
+| `G` | Next animation clip |
 | `E` | Export the current model as `.glb` + `.obj` into Downloads (round-trip verified) |
 | `N` | Next video source |
 | Gaze-click deck widgets | Bottom "Video" deck: PLAY/PAUSE · ‹SRC/SRC› · LOOP toggle · SEEK slider (click = seek) |
@@ -429,15 +432,21 @@ right after `input swipe` did nothing).
 - [x] **CI**: GitHub Actions workflow (`test assembleDebug` on push/PR) —
       done: `.github/workflows/ci.yml`, green on every push
 - [x] **Parser test suite**: round-trip tests for `GltfParser` ↔
-      `GltfExporter` + STL — done: 6 JVM tests in `core-scene`
+      `GltfExporter` + STL + animation round-trip — done: 12 JVM
+      tests in `core-scene`
 
 ### Medium-term (real features)
 
 - [ ] **Phase C — spatial web browsing**: WebView rendered into a quad,
       PC desktop sharing via the `verto-display-driver` IPC bridge
       (Python `vdd` agent over LAN)
-- [ ] **glTF animations & skinning**: animation channels → Filament
-      `Animator`/bone transforms (character models become usable)
+- [x] **glTF animations (rigid)** — done: `animations` parsed (channels +
+      samplers, LINEAR/STEP/CUBICSPLINE with proper Hermite + quaternion
+      nlerp), an `Animator` per object ticks on the render thread and
+      writes node transforms (looping playback, frame-delta clamp);
+      exported back to GLB (TRS nodes). Controls: `A` play/pause, `G`
+      next clip. **Skinning (JOINTS/WEIGHTS → bone matrices) still open**
+      — characters need it
 - [ ] **Morph targets**, Draco/KTX2-compressed glTF (needs a decoder —
       draco-android or a pure-Kotlin path)
 - [ ] **Full material export**: `.mtl` for OBJ, re-encoded textures in

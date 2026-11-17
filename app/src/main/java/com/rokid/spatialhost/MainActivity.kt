@@ -1018,6 +1018,16 @@ class MainActivity : Activity() {
                 deleteSelected()
                 return true
             }
+
+            KeyEvent.KEYCODE_A -> {
+                renderer.requestAnimationToggle()
+                return true
+            }
+
+            KeyEvent.KEYCODE_G -> {
+                renderer.requestNextAnimationClip()
+                return true
+            }
         }
         handleGesture(recognizer.onEvent(InputEvent.Key(keyCode)))
         return super.onKeyDown(keyCode, event)
@@ -1449,6 +1459,10 @@ class MainActivity : Activity() {
                         (p?.let { " · y=${"%.2f".format(it[1])}" } ?: "") +
                         " · floor $FLOOR_TOP_Y m (P=toggle)\n",
                 )
+            }
+            val anim = renderer.animationStatus
+            if (anim != "off") {
+                append("anim   : $anim · (A=play/pause G=clip)\n")
             }
             append(
                 "power  : ${stats.mahUsed.toInt()} mAh · ${"%.0f".format(stats.drainMa)} mA · " +
